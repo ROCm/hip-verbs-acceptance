@@ -1,0 +1,30 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# PR security gate: the ROCm security baseline scanners on every pull request.
+# The set of scanners lives in rocm-security-gh's security-baseline.yml, so
+# scanners added there are picked up here without touching this file.
+
+name: Security scan (PR)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    # actions: read + pull-requests: write let the baseline post its findings
+    # comment; a reusable workflow cannot grant itself more than this job does.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@228e62369c5d8b677215f8a112ea0c8e8119c58f # v1.0.6
+    with:
+      report_formats: human

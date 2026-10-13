@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Dependabot version updates for GitHub Actions, including bumps of the
+# pinned ROCm security baseline. See
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    # Third-party actions wait a week after release; baseline bumps are
+    # security updates and are proposed right away, in their own PR.
+    cooldown:
+      default-days: 7
+      exclude:
+        - "ROCm/rocm-security-gh*"
+    groups:
+      rocm-security-gh:
+        patterns:
+          - "ROCm/rocm-security-gh*"
+      github-actions:
+        patterns:
+          - "*"
