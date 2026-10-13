@@ -18,8 +18,11 @@ permissions:
 jobs:
   security:
     # Only the job that uploads SARIF gets write access to code scanning.
+    # actions: read is what SARIF upload needs to read the run in a private
+    # repository; it is harmless once the repository is public.
     permissions:
       contents: read
+      actions: read
       security-events: write
     uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@228e62369c5d8b677215f8a112ea0c8e8119c58f # v1.0.6
     with:

@@ -1,0 +1,27 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# gitleaks policy for this repository, picked up by the ROCm security
+# baseline (security_scan_*.yml) in place of its default config.
+# Local scan: gitleaks git --config .gitleaks.toml
+
+title = "hip-verbs-acceptance gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+# The requirement knowledge bases name each test scenario in a
+# "scenario_key" field (e.g. "vat_mlx5dv_dmabuf_mr"); generic-api-key reads
+# the field name as a credential. All three conditions must hold, so a real
+# key placed anywhere else, or in any other field, is still reported.
+description = "Scenario identifiers in the skill knowledge bases"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''^\.cursor/skills/[^/]+/knowledge/[^/]+_kb\.json$''',
+]
+regexTarget = "line"
+regexes = [
+  '''^\s*"scenario_key": "[a-z0-9_]+",?\s*$''',
+]
