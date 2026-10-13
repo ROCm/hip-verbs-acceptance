@@ -1,0 +1,183 @@
+# Thor on MI350 (gfx950) — combined verbs + HIP acceptance policy
+# test,class,when,expected,ticket,reason
+
+# ===================== Verbs =====================
+vat_device_enum,MUST_PASS,,,,
+vat_pd_cq_mr,MUST_PASS,,,,
+vat_rc_qp_capacity,MUST_PASS,,,,
+vat_device_caps_probe,MUST_PASS,,,,
+vat_fork_init,MUST_PASS,,,,
+vat_relaxed_ordering,MUST_PASS,,,,
+vat_reg_mr_latency,MUST_PASS,,,,
+vat_rc_qp_lifecycle,MUST_PASS,,,,
+vat_ud_qp_lifecycle,MUST_PASS,,,,
+vat_ud_grh_handling,MUST_PASS,,,,
+vat_srq_lifecycle,MUST_PASS,,,,
+# ECE is an mlx5-family capability; bnxt_re provider does not support it -> permanently N/A.
+vat_ece_negotiation,NA,,,,bnxt_re provider does not support ECE (ibv_query_ece unsupported)
+vat_rdma_write,MUST_PASS,,,,
+vat_rdma_read,MUST_PASS,,,,
+vat_rdma_write_with_imm,MUST_PASS,,,,
+vat_rdma_write_chain,MUST_PASS,,,,
+vat_inline_send,MUST_PASS,,,,
+vat_atomic_fetch_add,MUST_PASS,,,,
+vat_ah_lifecycle,MUST_PASS,,,,
+vat_reg_mr_iova2,MUST_PASS,,,,
+vat_qp_err_transition,MUST_PASS,,,,
+vat_cqe_error_codes,MUST_PASS,,,,
+vat_rc_qp_reset_recovery,MUST_PASS,,,,
+vat_rc_qp_reset_recovery_loopback,MUST_PASS,,,,
+vat_2node_ud_recovery_protocol,MUST_PASS,,,,
+vat_async_event_monitor,MUST_PASS,,,,
+# ionic vendor tests: different NIC -> NA on bnxt_re.
+vat_ionic_sq_sig_all,NA,,,,not an ionic NIC
+vat_ionic_inline_capacity,NA,,,,not an ionic NIC
+vat_ionic_udma_mask,NA,,,,not an ionic NIC
+vat_ionic_gda_enable,NA,,,,not an ionic NIC
+
+# ===================== HIP =====================
+
+# --- Streams & Events ---
+Stream_Create_Flags_Lifecycle,MUST_PASS,,,,
+Event_DisableTiming_CrossStream_Sync,MUST_PASS,,,,
+Event_Timing_Query_Elapsed,MUST_PASS,,,,
+LaunchHostFunc_StreamCallback,MUST_PASS,,,,
+StreamCaptureMode_Exchange,MUST_PASS,,,,
+StreamGetId_Stable,MUST_PASS,rocm>=7.1,,,requires hipStreamGetId (ROCm >= 7.1)
+
+# --- Kernel Launch ---
+Kernel_Launch_DynShared_LastError,MUST_PASS,,,,
+Launch_DynShared_FuncAttr,MUST_PASS,,,,
+Kernel_LaunchVariants_Smoke,MUST_PASS,,,,
+GetFuncBySymbol_Resolve,MUST_PASS,,,,
+LaunchKernelEx_ClusterAttrs,MUST_PASS,,,,
+Launch_Cooperative_AfterQueueReclaim,KNOWN_FAILURE,,fail,ROCM-29369,SIGSEGV in hipLaunchCooperativeKernel on a stream whose idle hardware queue the runtime reclaimed
+
+# --- Runtime Module Loading ---
+Module_Load_Launch_Lifecycle,MUST_PASS,,,,
+Module_GetGlobal_Resolve,MUST_PASS,,,,
+
+# --- Data Movement ---
+Memcpy_H2D_Sync,MUST_PASS,,,,
+Memcpy_H2D_Async,MUST_PASS,,,,
+Memcpy_D2D_Sync,MUST_PASS,,,,
+Memcpy_D2D_Async,MUST_PASS,,,,
+Memcpy_D2H_Sync,MUST_PASS,,,,
+Memcpy_D2H_Async,MUST_PASS,,,,
+Memcpy_Size_Sweep,MUST_PASS,,,,
+Memset_Sync,MUST_PASS,,,,
+Memset_Async,MUST_PASS,,,,
+StreamBatchMemOp_WriteValue,MUST_PASS,rocm>=7.12,,,requires hipStreamBatchMemOp (ROCm >= 7.12)
+StreamBatchMemOp_WriteValue_PeerVisibility,MUST_PASS,rocm>=7.12,,,requires hipStreamBatchMemOp (ROCm >= 7.12)
+StreamWriteValue_PeerVisibility,MUST_PASS,,,,
+Ce_BatchCopy_Ordered,MUST_PASS,rocm>=7.12,,,requires hipMemcpyBatchAsync (ROCm >= 7.12)
+
+# --- Host Memory & Versioning ---
+Symbol_Version_Detection,MUST_PASS,,,,
+HostMalloc_Mapped_Uncached_DevPtr,MUST_PASS,,,,
+HostRegister_Mapped_Uncached,MUST_PASS,,,,
+
+# --- Graph Capture ---
+Capture_Dependency_Update_Chain,MUST_PASS,,,,
+Graph_Capture_AddHostNode,MUST_PASS,,,,
+
+# --- IPC ---
+Ipc_Legacy_GetOpen_RoundTrip,MUST_PASS,,,,
+
+# --- IPC under process density ---
+# ROCM-29090: hipIpcGetMemHandle intermittently fails once several processes
+# share a GPU and each holds imported peer handles. The one-process row is the
+# control; the rocm<7.2 row bounds the runtimes that never reach the defect.
+# The gpu rows are load-bearing: the tests use a fixed four GPUs rather than
+# probing. A box whose GPUs lack mutual peer access skips from inside the test.
+Ipc_Export_PeerImports_OneProcess,SKIP,gpu<4,,,needs 4 GPUs for cross-device peer imports
+Ipc_Export_PeerImports_OneProcess,MUST_PASS,,,,
+Ipc_Export_PeerImports_MultiProcess,SKIP,gpu<4,,,needs 4 GPUs for cross-device peer imports
+Ipc_Export_PeerImports_MultiProcess,MUST_PASS,rocm<7.2,,,ROCr below 7.2 does not take the dmabuf IPC path this defect lives in
+Ipc_Export_PeerImports_MultiProcess,KNOWN_FAILURE,,fail,ROCM-29090,hipIpcGetMemHandle fails under multi-process peer-import density (ROCr dmabuf IPC path)
+
+# --- Memory Manager ---
+HipMalloc_Free_Integrity,MUST_PASS,,,,
+HostAlloc_Pinned,MUST_PASS,,,,
+Vmm_Granularity,MUST_PASS,,,,
+Vmm_Create_Map_Roundtrip,MUST_PASS,,,,
+Vmm_SetGetAccess,MUST_PASS,,,,
+Vmm_GPUDirectRdmaVmm_Attribute,NA,,,ROCM-2550,requires HIP>=7.2 GPUDirectRDMA+VMM attribute
+Vmm_GpuDirectRDMACapable_MultiMap,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=1
+Vmm_RDMA_MultiMap_NoFlag,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=0
+Vmm_Negative_ZeroSize_Unaligned,MUST_PASS,,,,
+Vmm_PosixFd_Export_Import,MUST_PASS,,,,
+Vmm_PosixFd_Import_D2D_Copy,MUST_PASS,,,,
+# ROCM-20991 / ROCM-28090: VMM physical backing is not reclaimed while the VA
+# stays reserved, so both variants leak one buffer per cycle below ROCm 7.13,
+# where the ROCr fix landed. Verified on ROCm 7.0.2.2 / gfx950: +256 MiB/cycle.
+Vmm_Reclaim_Cycles_InProcess,KNOWN_FAILURE,rocm<7.13,fail,ROCM-20991,VMM release does not reclaim while VA reserved below ROCm 7.13
+Vmm_Reclaim_Cycles_InProcess,MUST_PASS,rocm>=7.13,,ROCM-20991,
+Vmm_Reclaim_Cycles_CrossProcess,KNOWN_FAILURE,rocm<7.13,fail,ROCM-20991,cross-process VMM reclaim broken below ROCm 7.13
+# In the 7.14 window the reclaim verdict is unreachable: ROCM-27777 breaks the
+# runtime's own cross-process POSIX-fd import, so the importer dies at
+# hipMemSetAccess, which the pre-existing Vmm_PosixFd_Export_Import shows there
+# too. Both bounds are measured, not inferred: 7.13.0 passes all three tests,
+# released 7.14.0 fails, and a later development build passes again.
+Vmm_Reclaim_Cycles_CrossProcess,SKIP,rocm>=7.14;rocm<7.15,,ROCM-27777,cross-process POSIX-fd import fails at hipMemSetAccess in the ROCM-27777 window
+Vmm_Reclaim_Cycles_CrossProcess,MUST_PASS,rocm>=7.13,,ROCM-20991,
+Vmm_Map_NoDeadlock_KernelInFlight,KNOWN_FAILURE,,fail,ROCM-25387,hipMemMap behind in-flight null-stream kernel
+Vmm_Fabric_Export_Import,NA,,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Fabric_Import_D2D_Copy,NA,,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Uncached_Type,MUST_PASS,rocm>=7.0.2,,,requires hipMemAllocationTypeUncached (ROCm >= 7.0.2)
+MallocAsync_FreeAsync,MUST_PASS,,,,
+MemPool_Alloc,MUST_PASS,,,,
+MemPool_SetAttribute,MUST_PASS,,,,
+MallocManaged_Access,MUST_PASS,,,,
+ExtMalloc_FineGrain,MUST_PASS,,,,
+
+# --- Device Management ---
+Device_Query_Basics,MUST_PASS,,,,
+Device_CanAccessPeer_Matrix,MUST_PASS,,,,
+Device_P2P_AllPairs_Copy,MUST_PASS,,,,
+Device_P2P_KernelAccess_AllPairs,MUST_PASS,,,,
+Device_Attr_Probe,MUST_PASS,,,,
+Hdp_Flush_Ordering,NA,,,,gfx<90a only
+DeviceSetLimit_StackSize,MUST_PASS,,,,
+PointerGetAttributes_DeviceVsHost,KNOWN_FAILURE,,fail,ROCM-2696,hipMemGetAddressRange null-arg crash
+DriverEntryPoint_Resolve,MUST_PASS,,,,
+Device_Reset_Mgmt,MUST_PASS,,,,
+
+# --- Library-surfaced HIP-runtime paths ---
+Occupancy_Query,MUST_PASS,,,,
+Texture_Object_Lifecycle,NA,,,,no image hw on CDNA3+
+Mem_Advise_Info,MUST_PASS,,,,
+Memcpy_Symbol,MUST_PASS,,,,
+
+# --- HSA interop ---
+Hsa_MemoryPool_LockHostToPool,MUST_PASS,,,,
+
+# --- HIP + Verbs mixed data-path ---
+vat_vmm_dmabuf_reg_not_regmr,MUST_PASS,sym:hipMemGetHandleForAddressRange;sym:ibv_reg_dmabuf_mr,,,
+vat_gpu_read_flush_after_recv,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_gpu_mr_dereg_inflight,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_gpu_nic_coherence_streamwait_wait_first,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
+vat_gpu_nic_coherence_streamwait_put_first,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
+vat_gpu_nic_coherence_streamwait_cross_nic,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
+vat_hipalloc_x_ibvreg__device__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__device__dmabuf_v1,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_hipalloc_x_ibvreg__device__dmabuf_v2_pcie,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_hipalloc_x_ibvreg__host_default__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__host_default__dmabuf_v1,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_default__dmabuf_v2_pcie,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_wc__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__host_wc__dmabuf_v1,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_wc__dmabuf_v2_pcie,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_coherent__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__host_coherent__dmabuf_v1,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_coherent__dmabuf_v2_pcie,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_noncoherent__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__host_noncoherent__dmabuf_v1,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__host_noncoherent__dmabuf_v2_pcie,SKIP,,,,host memory is not GPU-dmabuf-exportable (HSA INVALID_AGENT)
+vat_hipalloc_x_ibvreg__finegrain__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__finegrain__dmabuf_v1,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_hipalloc_x_ibvreg__finegrain__dmabuf_v2_pcie,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
+vat_hipalloc_x_ibvreg__managed__regmr,MUST_PASS,,,,
+vat_hipalloc_x_ibvreg__managed__dmabuf_v1,SKIP,,,,managed memory is not GPU-dmabuf-exportable (HSA INVALID_ALLOCATION)
+vat_hipalloc_x_ibvreg__managed__dmabuf_v2_pcie,SKIP,,,,managed memory is not GPU-dmabuf-exportable (HSA INVALID_ALLOCATION)
+

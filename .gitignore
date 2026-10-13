@@ -1,0 +1,14 @@
+# Build output
+build/
+build*/
+
+# Run artifacts (reports / raw per-rank results / logs)
+report.json
+*.report.json
+worker_results.json
+*.kv
+*.log
+
+# Local scratch / reference files (not part of the repo)
+/*.cpp
+docs/*presentation*.html

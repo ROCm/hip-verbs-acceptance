@@ -1,0 +1,32 @@
+# synthetic_when.csv — `when`-engine fixture for selftest (ACCEPT_FAKE_ENV=1:
+# rocm=0.0-fake, driver=0.0-fake, gpu=8, sym:hsa_amd_portable_export_dmabuf=true).
+# test,class,when,expected,ticket,reason
+
+# A: predicate holds on fake env -> NA.
+syn_pass,NA,rocm<0.1,,ADR005-A,fake rocm 0.0 is below 0.1
+# B: single-row; predicate fails -> NA automatically (no catch-all needed).
+syn_fail,MUST_PASS,rocm>=1.0,,ADR005-B,requires rocm>=1.0; NA on older env
+# C: piecewise; first matching row wins.
+syn_skip,NA,rocm<0.1,,ADR005-C,piecewise first row fires
+syn_skip,MUST_PASS,,,,
+# D: multi-term AND (both hold on fake env).
+syn_crash_abort,NA,rocm<0.1;gpu>=8,,ADR005-D,both terms true on fake env
+syn_crash_abort,MUST_PASS,,,,
+# E: sym predicate (symbol present in fake env).
+syn_crash_segv,NA,sym:hsa_amd_portable_export_dmabuf,,ADR005-E,symbol present in fake env
+syn_crash_segv,MUST_PASS,,,,
+# F: !sym predicate (libionic absent in fake env).
+syn_hang,NA,!sym:libionic,,ADR005-F,libionic absent in fake env
+syn_hang,MUST_PASS,,,,
+
+# Not exercised with `when`; classified so they are not UNCLASSIFIED.
+syn_hang_ignore_sigterm,MUST_PASS,,,,
+syn_exit_nonzero,MUST_PASS,,,,
+syn_corrupt_result,MUST_PASS,,,,
+syn_spawn_grandchild_hang,MUST_PASS,,,,
+syn_known_failure_fail,KNOWN_FAILURE,,fail,TICKET-1,known failure fixture
+syn_known_failure_pass,KNOWN_FAILURE,,fail,TICKET-2,fixture that unexpectedly passes
+syn_na,NA,,,,not applicable on synthetic vendor
+syn2_barrier,MUST_PASS,,,,
+syn2_r0fail_r1pass,MUST_PASS,,,,
+syn2_r0pass_r1passive,MUST_PASS,,,,

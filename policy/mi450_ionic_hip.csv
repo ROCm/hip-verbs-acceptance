@@ -1,0 +1,90 @@
+# test,class,when,expected,ticket,reason
+
+# --- Streams & Events ---
+Stream_Create_Flags_Lifecycle,MUST_PASS,,,,
+Event_DisableTiming_CrossStream_Sync,MUST_PASS,,,,
+Event_Timing_Query_Elapsed,MUST_PASS,,,,
+LaunchHostFunc_StreamCallback,MUST_PASS,,,,
+StreamCaptureMode_Exchange,MUST_PASS,,,,
+StreamGetId_Stable,MUST_PASS,rocm>=7.1,,,requires hipStreamGetId (ROCm >= 7.1)
+
+# --- Kernel Launch ---
+Kernel_Launch_DynShared_LastError,MUST_PASS,,,,
+Launch_DynShared_FuncAttr,MUST_PASS,,,,
+Kernel_LaunchVariants_Smoke,MUST_PASS,,,,
+GetFuncBySymbol_Resolve,MUST_PASS,,,,
+LaunchKernelEx_ClusterAttrs,MUST_PASS,,,,
+
+# --- Runtime Module Loading (MORI) ---
+Module_Load_Launch_Lifecycle,MUST_PASS,,,,
+Module_GetGlobal_Resolve,MUST_PASS,,,,
+
+# --- Data Movement ---
+Memcpy_H2D_Sync,MUST_PASS,,,,
+Memcpy_H2D_Async,MUST_PASS,,,,
+Memcpy_D2D_Sync,MUST_PASS,,,,
+Memcpy_D2D_Async,MUST_PASS,,,,
+Memcpy_D2H_Sync,MUST_PASS,,,,
+Memcpy_D2H_Async,MUST_PASS,,,,
+Memcpy_Size_Sweep,MUST_PASS,,,,sizes 1B..256MiB x H2D/D2H/D2D/P2P sync+async; P2P leg needs >=2 GPUs visible
+Memset_Sync,MUST_PASS,,,,
+Memset_Async,MUST_PASS,,,,
+StreamBatchMemOp_WriteValue,MUST_PASS,rocm>=7.12,,,requires hipStreamBatchMemOp (ROCm >= 7.12)
+StreamBatchMemOp_WriteValue_PeerVisibility,MUST_PASS,rocm>=7.12,,ROCM-31976,batch WRITE_VALUE_32 flag overtakes earlier data to a peer device; fails between DPX partitions of one GPU
+StreamWriteValue_PeerVisibility,MUST_PASS,,,,control for StreamBatchMemOp_WriteValue_PeerVisibility (hipStreamWriteValue32)
+Ce_BatchCopy_Ordered,MUST_PASS,rocm>=7.12,,,requires hipMemcpyBatchAsync (ROCm >= 7.12)
+
+# --- Host Memory & Versioning ---
+Symbol_Version_Detection,MUST_PASS,,,,
+HostMalloc_Mapped_Uncached_DevPtr,MUST_PASS,,,,
+HostRegister_Mapped_Uncached,MUST_PASS,,,,
+
+# --- Graph Capture ---
+Capture_Dependency_Update_Chain,MUST_PASS,,,,
+Graph_Capture_AddHostNode,MUST_PASS,,,,
+
+# --- IPC legacy ---
+# Requires fresh-process isolation (Runner force-isolates the hip/ipc category);
+# passes once the child is exec'd instead of forked from a HIP-dirty worker.
+Ipc_Legacy_GetOpen_RoundTrip,MUST_PASS,,,,
+
+# --- Memory Manager / VMM ---
+HipMalloc_Free_Integrity,MUST_PASS,,,,
+HostAlloc_Pinned,MUST_PASS,,,,
+Vmm_Granularity,MUST_PASS,,,,
+Vmm_Create_Map_Roundtrip,MUST_PASS,,,,
+Vmm_SetGetAccess,MUST_PASS,,,,
+Vmm_GPUDirectRdmaVmm_Attribute,MUST_PASS,rocm>=7.2,,ROCM-2550,requires hipDeviceAttributeGPUDirectRDMAWithHipVMMSupported (ROCm >= 7.2)
+Vmm_GpuDirectRDMACapable_MultiMap,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=1
+Vmm_RDMA_MultiMap_NoFlag,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=0
+Vmm_Negative_ZeroSize_Unaligned,MUST_PASS,,,,
+Vmm_PosixFd_Export_Import,MUST_PASS,,,,
+Vmm_PosixFd_Import_D2D_Copy,MUST_PASS,,,,
+Vmm_Map_NoDeadlock_KernelInFlight,MUST_PASS,,,ROCM-25387,fixed as of ROCm 10.1.0
+Vmm_Fabric_Export_Import,MUST_PASS,rocm>=7.12,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Fabric_Import_D2D_Copy,MUST_PASS,rocm>=7.12,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Uncached_Type,MUST_PASS,rocm>=7.0.2,,,requires hipMemAllocationTypeUncached (ROCm >= 7.0.2)
+MallocAsync_FreeAsync,MUST_PASS,,,,
+MemPool_Alloc,MUST_PASS,,,,
+MemPool_SetAttribute,MUST_PASS,,,,
+MallocManaged_Access,NA,,,,gfx1250: no managed-memory attribute
+ExtMalloc_FineGrain,MUST_PASS,,,,
+
+# --- Device Management ---
+Device_Query_Basics,MUST_PASS,,,,
+Device_CanAccessPeer_Matrix,MUST_PASS,,,,requires all local GPUs visible (no HIP_VISIBLE_DEVICES subset)
+Device_P2P_AllPairs_Copy,MUST_PASS,,,,all peer-capable GPU pairs, both directions; requires all local GPUs visible
+Device_P2P_KernelAccess_AllPairs,MUST_PASS,,,,in-kernel peer read across all pairs; requires all local GPUs visible
+Device_Attr_Probe,MUST_PASS,,,,
+Hdp_Flush_Ordering,NA,,,,gfx<90a only; not applicable on gfx1250
+DeviceSetLimit_StackSize,MUST_PASS,,,,
+PointerGetAttributes_DeviceVsHost,MUST_PASS,,,ROCM-2696,fixed as of ROCm 10.1.0
+DriverEntryPoint_Resolve,MUST_PASS,,,,
+Device_Reset_Mgmt,MUST_PASS,,,,
+
+# --- Library-surfaced / HSA interop ---
+Occupancy_Query,MUST_PASS,,,,
+Texture_Object_Lifecycle,NA,,,,no image hw on gfx1250
+Mem_Advise_Info,MUST_PASS,,,,
+Memcpy_Symbol,MUST_PASS,,,,
+Hsa_MemoryPool_LockHostToPool,MUST_PASS,,,,

@@ -1,0 +1,187 @@
+# example.csv — policy reference.
+#
+# Documents every parameter, predicate dimension, operator, and pattern the
+# policy engine supports. NOT meant to be run against real tests (the test
+# names are illustrative); use it as a copy-paste template for real per-vendor
+# files (thor.csv, connectx.csv, ionic.csv).
+#
+# FORMAT
+#   test,class,when,expected,ticket,reason
+#         ↑      ↑    ↑        ↑      ↑
+#         |      |    |        |      verbatim remainder (commas ok, not trimmed)
+#         |      |    |        KNOWN_FAILURE only: expected reduced status
+#         |      |    |           fail|pass|skip|none  (default "fail" if empty)
+#         |      |    `;`-AND of predicates (empty = always applies)
+#         |      MUST_PASS | NA | KNOWN_FAILURE | UNCLASSIFIED
+#         exact id OR fnmatch glob (see Precedence below)
+#
+# Split is on the FIRST 5 commas only; everything after the 5th comma is the
+# reason verbatim (commas, spaces, etc. are preserved in the reason field).
+#
+# CLASSES
+#   MUST_PASS     — test must pass; fail/timeout/crash gates the suite. Every test
+#                   runs process-isolated by default, so a crash/hang is contained
+#                   and surfaced as a gate failure (this subsumes the old
+#                   REGRESSION class, which had identical gate semantics).
+#   NA            — not applicable; test is not run; row is synthesized in report
+#   KNOWN_FAILURE — expected to fail (tracked bug); gate still passes; flagged if fixed
+#   UNCLASSIFIED  — (unlisted row) runs but never gate-fails; appears flagged in report
+#
+# WHEN PREDICATES
+#   A `;`-separated AND of terms. Empty `when` = always applies (catch-all).
+#   Missing/undetected dimension (empty env field) → predicate evaluates to false.
+#
+#   Dimensions:
+#     rocm    — EnvironmentInfo::rocm_version   (e.g. "7.0.1")
+#     driver  — EnvironmentInfo::driver_version  (e.g. "6.14.14", amdgpu KMD)
+#     fw      — first RdmaDevice::fw_ver         (e.g. "233.2.104.0")
+#     gpu     — EnvironmentInfo::gpu_count       (integer)
+#     sym:<n> — EnvironmentInfo::symbols["<n>"] is true  (library/symbol present)
+#    !sym:<n> — EnvironmentInfo::symbols["<n>"] is false (absent)
+#
+#   Operators for rocm/driver/fw: >= <= > < == !=
+#   Version comparison: leading numeric dot-separated components, padded with zeros.
+#     "7.0.1 >= 7.0" → true;  "7.0 > 7.0.1" → false;  "233.2.104.0 >= 233.0" → true
+#   Operators for gpu: same set; integer comparison.
+#   Non-numeric suffix on a version string is ignored ("6.14.14-custom" → [6,14,14]).
+#
+#   OR across rows — piecewise: list rows most-specific first, catch-all last.
+#   First row whose `when` evaluates to true wins. Rows with failing predicates
+#   are skipped (no fallthrough to Unclassified; the next row is tried instead).
+#
+# PRECEDENCE within a file
+#   1. Exact id match (first declared among exacts)
+#   2. Glob (longest literal prefix wins; ties → first declared)
+#   3. Unlisted → Unclassified
+#   Within each bucket, predicate-failing rows are skipped in declaration order.
+#
+# IN-POLICY-BUT-NO-MATCH → NA (the single-row idiom)
+#   If a test IS listed (by id or glob) but no row's `when` predicate is satisfied
+#   in this environment, the test is NA — it is known to the policy, just not
+#   applicable here. (Contrast: a test that is NOT listed at all → Unclassified.)
+#   This is why `vat_foo,MUST_PASS,rocm>=7.12` needs no catch-all NA row: on older
+#   ROCm the predicate fails, the test is NA automatically. Add an explicit
+#   catch-all row ONLY when the "otherwise" outcome must be non-NA (MUST_PASS,
+#   KNOWN_FAILURE, etc.) — see §3/§4/§7.
+#
+# ---------------------------------------------------------------------------
+# 1. BASIC — no `when` (catch-all, always applies)
+# ---------------------------------------------------------------------------
+
+# Simple must-pass test with no conditions.
+vat_basic_send,MUST_PASS,,,,
+
+# NA test with a reason (not applicable on this vendor).
+vat_relaxed_ordering,NA,,,TICKET-123,RO unsupported on this NIC; flip to MUST_PASS when fw adds it
+
+# Known failure (bug tracked; gate passes).
+vat_qp_reset_recovery,KNOWN_FAILURE,,fail,TICKET-450,RESET path broken; use destroy+recreate
+
+# ---------------------------------------------------------------------------
+# 2. SINGLE-DIM WHEN PREDICATES
+# ---------------------------------------------------------------------------
+
+# MUST_PASS only at/above a ROCm version; NA automatically on older ROCm.
+# Single row suffices: if rocm>=7.12 fails, the engine returns NA (test is in
+# policy but inapplicable here) without needing an explicit catch-all NA row.
+vat_gdma_fabric,MUST_PASS,rocm>=7.12,,TICKET-77,fabric API requires ROCm 7.12
+
+# MUST_PASS only on new enough amdgpu KMD driver; NA on older driver.
+vat_kmd_feature,MUST_PASS,driver>=6.14,,TICKET-201,requires amdgpu driver >= 6.14
+
+# MUST_PASS only on new enough NIC firmware; NA on older fw.
+vat_fw_offload,MUST_PASS,fw>=230.0,,TICKET-310,offload path added in fw 230
+
+# MUST_PASS only on multi-GPU nodes; NA on single-GPU (no peer path).
+vat_peer_copy,MUST_PASS,gpu>=2,,,
+
+# MUST_PASS everywhere; the scalar path is still exercised on single-GPU. A
+# single catch-all row covers both (no need to special-case gpu>=2).
+vat_multi_gpu_bw,MUST_PASS,,,,
+
+# MUST_PASS only when required optional library is present; NA otherwise.
+vat_ionic_ionic_path,MUST_PASS,sym:libionic,,TICKET-456,requires libionic direct-verbs
+
+# MUST_PASS only when dmabuf capability symbol is present; NA otherwise.
+vat_dmabuf_rdma,MUST_PASS,sym:hsa_amd_portable_export_dmabuf,,TICKET-88,requires hsa_amd_portable_export_dmabuf
+
+# ---------------------------------------------------------------------------
+# 3. MULTI-DIM AND PREDICATES (single-row "requires all of")
+# ---------------------------------------------------------------------------
+# `;` joins terms with AND: the row applies only when EVERY term holds. State the
+# positive requirement directly — the test is applicable (MUST_PASS) when all
+# conditions are met, and NA automatically otherwise. No catch-all row needed.
+#
+# IMPORTANT: this is the AND of *requirements*, not the inverse of an exclusion.
+# "MUST_PASS,rocm>=7.0;driver>=6.14" means NA unless BOTH hold (NA if EITHER is
+# old). If you instead need "NA only when BOTH are old" (i.e. works if EITHER is
+# new — an OR), the grammar has no in-row OR; use a piecewise pattern (see §4).
+
+# Applicable only when ROCm 7.0+ AND driver 6.14+ are both present.
+vat_combined_req,MUST_PASS,rocm>=7.0;driver>=6.14,,TICKET-99,needs ROCm 7.0 and driver 6.14
+
+# Applicable only when fw is new enough AND the dmabuf symbol is present
+# (hardware + software requirement combined).
+vat_fw_and_sym,MUST_PASS,fw>=233.0;sym:hsa_amd_portable_export_dmabuf,,TICKET-500,needs fw 233+ and dmabuf
+
+# Three-term AND: full modern stack — ROCm 7+ AND fw 100+ AND multi-GPU.
+vat_triple_cond,MUST_PASS,rocm>=7.0;fw>=100.0;gpu>=2,,TICKET-101,needs ROCm7+/fw100+/multi-GPU
+
+# ---------------------------------------------------------------------------
+# 4. PIECEWISE (OR-ACROSS-ROWS) PATTERNS
+# ---------------------------------------------------------------------------
+# NOTE: these KEEP an explicit catch-all row on purpose. The implicit fallback
+# is always NA; when the "otherwise" outcome must be MUST_PASS (or any non-NA
+# class), you need the trailing catch-all row — it cannot be collapsed away.
+
+# Three-tier piecewise: KNOWN_FAILURE on an old-but-not-ancient stack;
+# NA on a very old stack; MUST_PASS on a modern stack.
+vat_versioned_behavior,NA,rocm<6.0,,TICKET-200,API absent before ROCm 6
+vat_versioned_behavior,KNOWN_FAILURE,rocm<7.0,fail,TICKET-201,buggy on ROCm 6.x
+vat_versioned_behavior,MUST_PASS,,,,
+
+# Firmware-version piecewise: KNOWN_FAILURE on a buggy firmware range;
+# MUST_PASS below (unaffected old fw) and above (fixed fw).
+vat_fw_regression,KNOWN_FAILURE,fw>=230.0;fw<233.0,fail,TICKET-310,deadlock in fw 230–232
+vat_fw_regression,MUST_PASS,,,,
+
+# OR-of-requirements via piecewise (the grammar has no in-row OR). The feature is
+# available if EITHER ROCm is 7.12+ OR the backport symbol is present. List each
+# alternative as its own MUST_PASS row; if none match -> NA automatically.
+vat_either_path,MUST_PASS,rocm>=7.12,,TICKET-500,native path on ROCm 7.12+
+vat_either_path,MUST_PASS,sym:hsa_amd_portable_export_dmabuf,,TICKET-500,backport path via dmabuf symbol
+
+# ---------------------------------------------------------------------------
+# 5. FNMATCH GLOB PATTERNS (id column)
+# ---------------------------------------------------------------------------
+
+# All vat_ionic_* tests are NA on this vendor (wildcard covers new tests too).
+vat_ionic_*,NA,,,TICKET-999,ionic-specific; not applicable on this NIC
+
+# All vat_perf_* tests are MUST_PASS (performance should not regress; a failure
+# or crash gates the suite).
+vat_perf_*,MUST_PASS,,,,
+
+# ---------------------------------------------------------------------------
+# 6. GLOB + WHEN COMBINED
+# ---------------------------------------------------------------------------
+
+# All vmm_* tests are MUST_PASS on ROCm 7+, NA automatically below (single row).
+# The glob path applies the same in-policy-but-no-predicate-match -> NA rule.
+vmm_*,MUST_PASS,rocm>=7.0,,TICKET-400,VMM API requires ROCm 7.0
+
+# ---------------------------------------------------------------------------
+# 7. EDGE CASES & NOTES
+# ---------------------------------------------------------------------------
+
+# A test with a reason that contains commas (verbatim after 5th comma).
+vat_with_commas,MUST_PASS,,,TICKET-X,reason with commas: yes, this works, and is verbatim
+
+# A KNOWN_FAILURE with explicit expected_status (what reduced status we expect).
+vat_known_skip,KNOWN_FAILURE,,skip,TICKET-77,expected to skip (node lacks the capability)
+
+# Equality check: exact fw version pinned to a known-broken release. The catch-all
+# is required here because the "otherwise" outcome is MUST_PASS, not NA (the test
+# is expected to work on every fw except the pinned-broken one).
+vat_pinned_bug,KNOWN_FAILURE,fw==233.1.100.0,fail,TICKET-311,bug present only on fw 233.1.100.0
+vat_pinned_bug,MUST_PASS,,,,

@@ -1,0 +1,1171 @@
+{
+  "_meta": {
+    "name": "Verbs acceptance requirements knowledge base",
+    "purpose": "Curated standard of libibverbs/rdma-cm/mlx5dv acceptance scenarios so the skill is self-contained. Matched against (a) how the source uses verbs and (b) what the verbs test corpus already covers, to decide what to PROPOSE.",
+    "epic": "Verbs acceptance (Step 2)",
+    "classes": {
+      "MUST-PASS": "Hard baseline; capability officially supported. Missing => FAIL, not skip.",
+      "CONDITIONAL": "Version/capability gated (atomics, dmabuf, ionic, relaxed-ordering, 2-node); skip allowed but log reason + gate.",
+      "REGRESSION": "Targets a known issue / recovery path; a hang/timeout/crash is the signal."
+    },
+    "fields": "id, title, area, class, gate, signal_apis[], sequence[], known_issue, description, verify, impl_hint, provenance_hint, scenario_key, match_names[]"
+  },
+  "requirements": [
+    {
+      "id": "VAT-001",
+      "title": "vat_device_enum",
+      "area": "foundation",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_close_device",
+        "ibv_free_device_list",
+        "ibv_get_device_list",
+        "ibv_open_device",
+        "ibv_query_gid",
+        "ibv_query_port"
+      ],
+      "sequence": [
+        "ibv_get_device_list",
+        "ibv_open_device",
+        "ibv_query_port",
+        "ibv_query_gid"
+      ],
+      "known_issue": "",
+      "description": "Enumerate devices, query ports, validate the GID table.",
+      "verify": "Device list non-empty; ports queryable; GID table valid.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib/init.cc",
+      "scenario_key": "vat_device_enum",
+      "match_names": [
+        "vat_device_enum",
+        "VAT-001"
+      ]
+    },
+    {
+      "id": "VAT-002",
+      "title": "vat_pd_cq_mr",
+      "area": "foundation",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_alloc_pd",
+        "ibv_create_cq",
+        "ibv_reg_mr",
+        "ibv_dereg_mr",
+        "ibv_destroy_cq",
+        "ibv_dealloc_pd"
+      ],
+      "sequence": [
+        "ibv_alloc_pd",
+        "ibv_create_cq",
+        "ibv_reg_mr",
+        "ibv_dereg_mr",
+        "ibv_destroy_cq",
+        "ibv_dealloc_pd"
+      ],
+      "known_issue": "",
+      "description": "PD/CQ/MR lifecycle across all access-flag combinations.",
+      "verify": "All create/destroy succeed; MR usable under each access-flag combo.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_pd_cq_mr",
+      "match_names": [
+        "vat_pd_cq_mr",
+        "VAT-002"
+      ]
+    },
+    {
+      "id": "VAT-003",
+      "title": "vat_rc_qp_capacity",
+      "area": "foundation",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_create_qp",
+        "ibv_query_qp"
+      ],
+      "sequence": [
+        "ibv_create_qp",
+        "ibv_query_qp"
+      ],
+      "known_issue": "",
+      "description": "Verify advertised QP limits (max_send_wr=512, max_recv_wr=256, inline_data).",
+      "verify": "Queried caps match the requested/advertised limits.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rc_qp_capacity",
+      "match_names": [
+        "vat_rc_qp_capacity",
+        "VAT-003"
+      ]
+    },
+    {
+      "id": "VAT-004",
+      "title": "vat_relaxed_ordering",
+      "area": "foundation",
+      "class": "CONDITIONAL",
+      "gate": "IBV_ACCESS_RELAXED_ORDERING supported",
+      "signal_apis": [
+        "ibv_reg_mr"
+      ],
+      "sequence": [
+        "ibv_reg_mr"
+      ],
+      "known_issue": "",
+      "description": "Register MRs with IBV_ACCESS_RELAXED_ORDERING; confirm ops complete correctly under relaxed PCIe ordering with no silent corruption.",
+      "verify": "RDMA under relaxed-ordering MR completes with no corruption; SKIP if flag unsupported.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_relaxed_ordering",
+      "match_names": [
+        "vat_relaxed_ordering",
+        "VAT-004"
+      ]
+    },
+    {
+      "id": "VAT-005",
+      "title": "vat_ece_negotiation",
+      "area": "foundation",
+      "class": "CONDITIONAL",
+      "gate": "ECE supported",
+      "signal_apis": [
+        "ibv_query_ece",
+        "ibv_set_ece"
+      ],
+      "sequence": [
+        "ibv_query_ece",
+        "ibv_set_ece"
+      ],
+      "known_issue": "",
+      "description": "Enhanced Connection Establishment: ibv_query_ece on a QP, exchange the ECE struct with the peer, ibv_set_ece to negotiate the vendor/options bits, then bring the QP to RTS. RCCL negotiates ECE during connect. SKIP if ECE unsupported.",
+      "verify": "ECE queried/set without error; QP connects with negotiated parameters; SKIP if unsupported.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL misc/ibvsymbols.cc (ibv_query_ece/set_ece); net_ib connect",
+      "scenario_key": "vat_ece_negotiation",
+      "match_names": [
+        "vat_ece_negotiation",
+        "VAT-005"
+      ]
+    },
+    {
+      "id": "VAT-006",
+      "title": "vat_reg_mr_iova2",
+      "area": "foundation",
+      "class": "REGRESSION",
+      "gate": "IBVERBS>=1.8 (iova2)",
+      "signal_apis": [
+        "ibv_reg_mr_iova2"
+      ],
+      "sequence": [
+        "ibv_reg_mr_iova2"
+      ],
+      "known_issue": "",
+      "description": "Register an MR with an explicit IOVA via ibv_reg_mr_iova2 (the IOVERBS 1.8 API RCCL cherry-picks), then RDMA over it. Some NIC drivers have failed this path on VMM-mapped symmetric VAs. A successful reg + transfer is the pass; EFAULT on a valid mapping is the regression signal.",
+      "verify": "iova2 registration succeeds and RDMA over the MR works; EFAULT on a valid buffer flags the regression.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL misc/ibvwrap.cc wrap_ibv_reg_mr_iova2",
+      "scenario_key": "vat_reg_mr_iova2",
+      "match_names": [
+        "vat_reg_mr_iova2",
+        "VAT-006"
+      ]
+    },
+    {
+      "id": "VAT-007",
+      "title": "vat_mlx5dv_create_qp",
+      "area": "connection",
+      "class": "CONDITIONAL",
+      "gate": "mlx5 NIC",
+      "signal_apis": [
+        "mlx5dv_create_qp"
+      ],
+      "sequence": [
+        "mlx5dv_create_qp"
+      ],
+      "known_issue": "",
+      "description": "Create a QP via the mlx5 Direct-Verbs path (mlx5dv_create_qp with ibv_qp_init_attr_ex + mlx5dv_qp_init_attr) rather than plain ibv_create_qp \u2014 the provider-specific creation RCCL uses for mlx5 features. Bring it to RTS and run a transfer. SKIP on non-mlx5 NICs.",
+      "verify": "DV-created QP reaches RTS and transfers correctly; SKIP on non-mlx5.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL misc/mlx5dvwrap.cc wrap_mlx5dv_create_qp",
+      "scenario_key": "vat_mlx5dv_create_qp",
+      "match_names": [
+        "vat_mlx5dv_create_qp",
+        "VAT-007"
+      ]
+    },
+    {
+      "id": "VAT-008",
+      "title": "vat_srq_lifecycle",
+      "area": "connection",
+      "class": "CONDITIONAL",
+      "gate": "SRQ supported",
+      "signal_apis": [
+        "ibv_create_srq",
+        "ibv_destroy_srq",
+        "ibv_poll_cq",
+        "ibv_post_recv"
+      ],
+      "sequence": [
+        "ibv_create_srq",
+        "ibv_destroy_srq",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Shared-receive-queue path: ibv_create_srq -> post receives to the SRQ -> drive RDMA/SEND into it -> ibv_destroy_srq. RCCL's GDA-KI verbs wrapper uses SRQ; the plan only tests per-QP recv. Verify shared receives are consumed correctly.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib/gdaki doca_verbs_ibv_wrapper.h",
+      "scenario_key": "vat_srq_lifecycle",
+      "match_names": [
+        "vat_srq_lifecycle",
+        "VAT-008"
+      ]
+    },
+    {
+      "id": "VAT-009",
+      "title": "vat_ah_lifecycle",
+      "area": "connection",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_create_ah",
+        "ibv_destroy_ah"
+      ],
+      "sequence": [
+        "ibv_create_ah",
+        "ibv_destroy_ah"
+      ],
+      "known_issue": "",
+      "description": "Address-handle create/destroy paired explicitly, including repeated create/destroy to catch AH leaks. The plan creates AHs (in UD) but never tests teardown in isolation.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL UD path / GDA-KI wrapper (ibv_destroy_ah)",
+      "scenario_key": "vat_ah_lifecycle",
+      "match_names": [
+        "vat_ah_lifecycle",
+        "VAT-009"
+      ]
+    },
+    {
+      "id": "VAT-010",
+      "title": "vat_rc_qp_lifecycle",
+      "area": "connection",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_create_qp",
+        "ibv_modify_qp"
+      ],
+      "sequence": [
+        "ibv_create_qp",
+        "ibv_modify_qp(INIT)",
+        "ibv_modify_qp(RTR)",
+        "ibv_modify_qp(RTS)"
+      ],
+      "known_issue": "",
+      "description": "RC QP INIT->RTR->RTS. Reliable, delivery-guaranteed connection - the absolute baseline.",
+      "verify": "QP reaches RTS; reliable transfer works.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rc_qp_lifecycle",
+      "match_names": [
+        "vat_rc_qp_lifecycle",
+        "VAT-010"
+      ]
+    },
+    {
+      "id": "VAT-011",
+      "title": "vat_ud_qp_lifecycle",
+      "area": "connection",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_create_qp",
+        "ibv_modify_qp",
+        "ibv_create_ah",
+        "ibv_post_send",
+        "ibv_post_recv"
+      ],
+      "sequence": [
+        "ibv_create_qp",
+        "ibv_modify_qp",
+        "ibv_create_ah",
+        "ibv_post_send",
+        "ibv_post_recv"
+      ],
+      "known_issue": "",
+      "description": "UD QP with QKEY, AH, SEND_WITH_IMM + receive. Unreliable, broadcast-style connection.",
+      "verify": "UD send/recv with imm delivered.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_ud_qp_lifecycle",
+      "match_names": [
+        "vat_ud_qp_lifecycle",
+        "VAT-011"
+      ]
+    },
+    {
+      "id": "VAT-012",
+      "title": "vat_ud_grh_handling",
+      "area": "connection",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Verify the 40-byte GRH prefix on UD receive.",
+      "verify": "Received UD payload offset by the 40B GRH; GRH parsed correctly.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_ud_grh_handling",
+      "match_names": [
+        "vat_ud_grh_handling",
+        "VAT-012"
+      ]
+    },
+    {
+      "id": "VAT-020",
+      "title": "vat_rdma_write",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_WRITE with data-integrity check (64 B - 1 MB).",
+      "verify": "Remote buffer matches the written pattern across sizes.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rdma_write",
+      "match_names": [
+        "vat_rdma_write",
+        "VAT-020"
+      ]
+    },
+    {
+      "id": "VAT-021",
+      "title": "vat_rdma_read",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_READ from a remote MR, including a passive QP (0 send/recv).",
+      "verify": "Local buffer equals the remote source after read.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rdma_read",
+      "match_names": [
+        "vat_rdma_read",
+        "VAT-021"
+      ]
+    },
+    {
+      "id": "VAT-022",
+      "title": "vat_rdma_write_with_imm",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_WRITE_WITH_IMM; encode/decode the 32-bit immediate; verify it arrives correctly.",
+      "verify": "imm_data received intact alongside the payload.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rdma_write_with_imm",
+      "match_names": [
+        "vat_rdma_write_with_imm",
+        "VAT-022"
+      ]
+    },
+    {
+      "id": "VAT-023",
+      "title": "vat_rdma_write_chain",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "N-WR chain with only the last WR signaled; verify all payloads land.",
+      "verify": "All chained payloads delivered; one completion for the signaled WR.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rdma_write_chain",
+      "match_names": [
+        "vat_rdma_write_chain",
+        "VAT-023"
+      ]
+    },
+    {
+      "id": "VAT-024",
+      "title": "vat_inline_send",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send"
+      ],
+      "sequence": [
+        "ibv_post_send"
+      ],
+      "known_issue": "",
+      "description": "RDMA_WRITE with IBV_SEND_INLINE (24 B, no MR).",
+      "verify": "Inline payload delivered without a registered MR.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_inline_send",
+      "match_names": [
+        "vat_inline_send",
+        "VAT-024"
+      ]
+    },
+    {
+      "id": "VAT-025",
+      "title": "vat_atomic_fetch_add",
+      "area": "datapath-host",
+      "class": "CONDITIONAL",
+      "gate": "atomic_cap != IBV_ATOMIC_NONE",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Chained RDMA_WRITE + ATOMIC_FETCH_AND_ADD.",
+      "verify": "Atomic add result correct after the preceding write.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_atomic_fetch_add",
+      "match_names": [
+        "vat_atomic_fetch_add",
+        "VAT-025"
+      ]
+    },
+    {
+      "id": "VAT-026",
+      "title": "vat_gpu_flush_loopback",
+      "area": "datapath-host",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Self-loopback RC QP with RDMA_READ (GPU flush path).",
+      "verify": "Loopback read completes; flush path validated.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_gpu_flush_loopback",
+      "match_names": [
+        "vat_gpu_flush_loopback",
+        "VAT-026"
+      ]
+    },
+    {
+      "id": "VAT-030",
+      "title": "vat_dmabuf_mr",
+      "area": "datapath-gpu",
+      "class": "CONDITIONAL",
+      "gate": "dmabuf supported",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "known_issue": "",
+      "description": "ibv_reg_dmabuf_mr with GPU memory (HIP + HSA export).",
+      "verify": "DMABUF MR registers over GPU memory; SKIP if dmabuf unavailable.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib reg dmabuf",
+      "scenario_key": "vat_dmabuf_mr",
+      "match_names": [
+        "vat_dmabuf_mr",
+        "VAT-030"
+      ]
+    },
+    {
+      "id": "VAT-031",
+      "title": "vat_gpu_rdma_write",
+      "area": "datapath-gpu",
+      "class": "CONDITIONAL",
+      "gate": "dmabuf supported",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_WRITE between DMABUF GPU buffers. Run per export version v1 and v2_pcie - they behave differently across hardware.",
+      "verify": "GPU buffer written correctly under both dmabuf export versions.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_gpu_rdma_write",
+      "match_names": [
+        "vat_gpu_rdma_write",
+        "VAT-031"
+      ]
+    },
+    {
+      "id": "VAT-032",
+      "title": "vat_gpu_rdma_read",
+      "area": "datapath-gpu",
+      "class": "CONDITIONAL",
+      "gate": "dmabuf supported",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_READ from a DMABUF GPU buffer + GPU flush loopback. Run per export version v1 and v2_pcie. Read and Write are separate driver code paths.",
+      "verify": "GPU read correct under both export versions.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_gpu_rdma_read",
+      "match_names": [
+        "vat_gpu_rdma_read",
+        "VAT-032"
+      ]
+    },
+    {
+      "id": "VAT-033",
+      "title": "vat_gpu_atomic",
+      "area": "datapath-gpu",
+      "class": "CONDITIONAL",
+      "gate": "atomic_cap + dmabuf",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Atomics over DMABUF GPU memory: Fetch-and-Add and Compare-and-Swap. Requires atomic support at the PCIe and NIC driver level.",
+      "verify": "FAA + CAS over GPU memory produce correct results.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_gpu_atomic",
+      "match_names": [
+        "vat_gpu_atomic",
+        "VAT-033"
+      ]
+    },
+    {
+      "id": "VAT-040",
+      "title": "vat_hipalloc_x_ibvreg",
+      "area": "gpu-correctness",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_reg_mr",
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send"
+      ],
+      "sequence": [
+        "ibv_reg_mr",
+        "ibv_reg_dmabuf_mr",
+        "ibv_post_send"
+      ],
+      "known_issue": "",
+      "description": "Matrix of 7 allocation modes (device malloc, pinned host, fine-grain, managed, ...) x 3 registration methods = 21 cases, each a separate CI line; RDMA_WRITE verifies data is transferred.",
+      "verify": "Each of the 21 alloc x reg combos transfers data correctly or skips cleanly.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_hipalloc_x_ibvreg",
+      "match_names": [
+        "vat_hipalloc_x_ibvreg",
+        "VAT-040"
+      ]
+    },
+    {
+      "id": "VAT-041",
+      "title": "vat_write_then_atomic_visibility",
+      "area": "gpu-correctness",
+      "class": "CONDITIONAL",
+      "gate": "atomic_cap",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Sender writes payload, then atomic-increments a counter. Receiver observes the counter, then reads the data. Verify payload is guaranteed visible in GPU HBM at the moment the atomic becomes visible (ordering preserved).",
+      "verify": "Data visible in GPU HBM when the atomic increment becomes visible.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_write_then_atomic_visibility",
+      "match_names": [
+        "vat_write_then_atomic_visibility",
+        "VAT-041"
+      ]
+    },
+    {
+      "id": "VAT-042",
+      "title": "vat_writeimm_data_visibility",
+      "area": "gpu-correctness",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "RDMA_WRITE_WITH_IMM. Verify that when the receiver observes completion (imm_data arrived), the payload is already fully visible in GPU HBM - the NIC must not signal completion before data lands.",
+      "verify": "Payload fully visible in GPU HBM at the moment the imm completion is observed.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_writeimm_data_visibility",
+      "match_names": [
+        "vat_writeimm_data_visibility",
+        "VAT-042"
+      ]
+    },
+    {
+      "id": "VAT-043",
+      "title": "vat_atomic_wakeup_gpu_stream",
+      "area": "gpu-correctness",
+      "class": "CONDITIONAL",
+      "gate": "atomic_cap",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "A GPU kernel polls a value in memory; a remote NIC atomic-increments it via RDMA. Verify the kernel wakes - the NIC write is visible to the GPU without extra CPU-side barriers.",
+      "verify": "GPU polling kernel observes the NIC atomic update without a CPU barrier.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_atomic_wakeup_gpu_stream",
+      "match_names": [
+        "vat_atomic_wakeup_gpu_stream",
+        "VAT-043"
+      ]
+    },
+    {
+      "id": "VAT-050",
+      "title": "vat_rc_qp_reset_recovery",
+      "area": "recovery",
+      "class": "REGRESSION",
+      "gate": "",
+      "signal_apis": [
+        "ibv_modify_qp",
+        "ibv_post_send"
+      ],
+      "sequence": [
+        "ibv_modify_qp(SQErr)",
+        "ibv_modify_qp(RESET)",
+        "ibv_modify_qp(INIT)",
+        "ibv_modify_qp(RTR)",
+        "ibv_modify_qp(RTS)",
+        "resume transfer"
+      ],
+      "known_issue": "",
+      "description": "Recover a downed RC QP via SQErr->Reset->Init->RTR->RTS and resume transfer without tearing down the full connection; also cover destroy+recreate.",
+      "verify": "QP recovers and resumes transfer; destroy+recreate path also works.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_rc_qp_reset_recovery",
+      "match_names": [
+        "vat_rc_qp_reset_recovery",
+        "VAT-050"
+      ]
+    },
+    {
+      "id": "VAT-051",
+      "title": "vat_cqe_error_codes",
+      "area": "recovery",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_poll_cq",
+        "ibv_wc_status_str"
+      ],
+      "sequence": [
+        "ibv_poll_cq",
+        "ibv_wc_status_str"
+      ],
+      "known_issue": "",
+      "description": "Generate WR_FLUSH_ERR; verify shared-CQ isolation.",
+      "verify": "Error CQE has expected status; other QPs on the shared CQ unaffected.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_cqe_error_codes",
+      "match_names": [
+        "vat_cqe_error_codes",
+        "VAT-051"
+      ]
+    },
+    {
+      "id": "VAT-052",
+      "title": "vat_qp_err_transition",
+      "area": "recovery",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_modify_qp",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_modify_qp",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "QP->ERR mechanics, outstanding-WR drain, RESET.",
+      "verify": "Outstanding WRs flush on ERR; RESET succeeds.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_qp_err_transition",
+      "match_names": [
+        "vat_qp_err_transition",
+        "VAT-052"
+      ]
+    },
+    {
+      "id": "VAT-053",
+      "title": "vat_ionic_ionic_features",
+      "area": "recovery",
+      "class": "CONDITIONAL",
+      "gate": "ionic / ionic",
+      "signal_apis": [
+        "ibv_create_qp",
+        "ibv_modify_qp"
+      ],
+      "sequence": [
+        "ibv_create_qp",
+        "ibv_modify_qp"
+      ],
+      "known_issue": "",
+      "description": "Vendor NIC feature bits.",
+      "verify": "Vendor feature bits accepted; SKIP on unsupported hardware.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_ionic_ionic_features",
+      "match_names": [
+        "vat_ionic_ionic_features",
+        "VAT-053"
+      ]
+    },
+    {
+      "id": "VAT-054",
+      "title": "vat_ionic_reset_broken",
+      "area": "recovery",
+      "class": "REGRESSION",
+      "gate": "ionic",
+      "signal_apis": [
+        "ibv_modify_qp",
+        "ibv_destroy_qp",
+        "ibv_create_qp"
+      ],
+      "sequence": [
+        "ibv_modify_qp",
+        "ibv_destroy_qp",
+        "ibv_create_qp"
+      ],
+      "known_issue": "",
+      "description": "Detect a QP RESET-recovery failure; verify destroy+recreate recovery path.",
+      "verify": "RESET-failure detected; destroy+recreate restores a working QP.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_ionic_reset_broken",
+      "match_names": [
+        "vat_ionic_reset_broken",
+        "VAT-054"
+      ]
+    },
+    {
+      "id": "VAT-055",
+      "title": "vat_async_event_monitor",
+      "area": "recovery",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_get_async_event",
+        "ibv_ack_async_event"
+      ],
+      "sequence": [
+        "ibv_get_async_event",
+        "ibv_ack_async_event"
+      ],
+      "known_issue": "",
+      "description": "Async-event path RCCL runs as a background monitor (net_ib/common.cc): ibv_get_async_event blocks for NIC events (port down/active, QP fatal error, etc.), the handler decodes the type and ibv_ack_async_event releases it. Trigger an event (e.g. force a QP to error) and verify it is delivered and acked without leaking. The signal RCCL uses to detect NIC/link failures for recovery.",
+      "verify": "An induced async event (QP fatal / port change) is delivered, decoded, and acked; no leak/hang.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib/common.cc (wrap_ibv_get/ack_async_event monitor thread)",
+      "scenario_key": "vat_async_event_monitor",
+      "match_names": [
+        "vat_async_event_monitor",
+        "VAT-055"
+      ]
+    },
+    {
+      "id": "VAT-056",
+      "title": "vat_fork_init",
+      "area": "foundation",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_fork_init"
+      ],
+      "sequence": [
+        "ibv_fork_init"
+      ],
+      "known_issue": "",
+      "description": "fork-safety init: call ibv_fork_init before registering MRs (RCCL does this at net init, net_ib.cc / init.cc), then fork() a child and confirm RDMA memory in the parent is not corrupted by COW. Without fork_init, registered pages can be silently broken across fork.",
+      "verify": "After ibv_fork_init + fork, parent's registered buffers stay intact for RDMA.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib.cc, net_ib/init.cc (wrap_ibv_fork_init)",
+      "scenario_key": "vat_fork_init",
+      "match_names": [
+        "vat_fork_init",
+        "VAT-056"
+      ]
+    },
+    {
+      "id": "VAT-060",
+      "title": "vat_2node_rdma_write_imm",
+      "area": "cross-node",
+      "class": "MUST-PASS",
+      "gate": "2 nodes",
+      "signal_apis": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "sequence": [
+        "ibv_post_send",
+        "ibv_post_recv",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "Cross-node RDMA_WRITE_WITH_IMM round-trip.",
+      "verify": "Cross-node write+imm round-trips correctly.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_2node_rdma_write_imm",
+      "match_names": [
+        "vat_2node_rdma_write_imm",
+        "VAT-060"
+      ]
+    },
+    {
+      "id": "VAT-061",
+      "title": "vat_2node_qp_recovery",
+      "area": "cross-node",
+      "class": "REGRESSION",
+      "gate": "2 nodes",
+      "signal_apis": [
+        "ibv_modify_qp",
+        "ibv_post_send"
+      ],
+      "sequence": [
+        "ibv_modify_qp",
+        "ibv_post_send"
+      ],
+      "known_issue": "",
+      "description": "Cross-node QP recovery with QPN re-exchange.",
+      "verify": "QP recovers across nodes after QPN re-exchange.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_2node_qp_recovery",
+      "match_names": [
+        "vat_2node_qp_recovery",
+        "VAT-061"
+      ]
+    },
+    {
+      "id": "VAT-062",
+      "title": "vat_2node_ud_recovery_protocol",
+      "area": "cross-node",
+      "class": "REGRESSION",
+      "gate": "2 nodes",
+      "signal_apis": [
+        "ibv_modify_qp",
+        "ibv_post_send",
+        "ibv_post_recv"
+      ],
+      "sequence": [
+        "ibv_modify_qp",
+        "ibv_post_send",
+        "ibv_post_recv"
+      ],
+      "known_issue": "",
+      "description": "Full UD recovery protocol: alive->ACK->QPN-exchange.",
+      "verify": "UD recovery handshake completes and transfer resumes.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "vat_2node_ud_recovery_protocol",
+      "match_names": [
+        "vat_2node_ud_recovery_protocol",
+        "VAT-062"
+      ]
+    },
+    {
+      "id": "VAT-070",
+      "title": "Gdr_HandleForAddressRange_Export",
+      "area": "gdr-handoff",
+      "class": "MUST-PASS",
+      "gate": "ROCm>=7.12 / backport",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "known_issue": "",
+      "description": "cudaGetDevice -> cuMemGetHandleForAddressRange -> hsa_amd_portable_export_dmabuf -> fd+offset for NIC GDR registration. Verify valid fd+offset (later registerable via ibv_reg_dmabuf_mr in the mixed test).",
+      "verify": "Valid fd+offset returned; registerable by ibv_reg_dmabuf_mr.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net.cc dmabuf export -> ibv_reg_dmabuf_mr",
+      "scenario_key": "Gdr_HandleForAddressRange_Export",
+      "match_names": [
+        "Gdr_HandleForAddressRange_Export",
+        "VAT-070"
+      ]
+    },
+    {
+      "id": "VAT-071",
+      "title": "DmaBuf_DeviceAttr_Probe",
+      "area": "gdr-handoff",
+      "class": "CONDITIONAL",
+      "gate": "cudaDriverGetVersion>=11070",
+      "signal_apis": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "sequence": [
+        "ibv_reg_dmabuf_mr"
+      ],
+      "known_issue": "",
+      "description": "dmaBufSupported: cudaDriverGetVersion (>=11070 gate) -> cuDeviceGet -> cuDeviceGetAttribute(DMA_BUF_SUPPORTED); on the HSA path assert hsa_amd_portable_export_dmabuf resolved. Report dma_buf availability; gates Gdr_HandleForAddressRange_Export.",
+      "verify": "dma_buf availability reported; gates the GDR export test.",
+      "impl_hint": "",
+      "provenance_hint": "",
+      "scenario_key": "DmaBuf_DeviceAttr_Probe",
+      "match_names": [
+        "DmaBuf_DeviceAttr_Probe",
+        "VAT-071"
+      ]
+    },
+    {
+      "id": "VAT-080",
+      "title": "vat_device_caps_probe",
+      "area": "foundation",
+      "class": "MUST-PASS",
+      "gate": "",
+      "signal_apis": [
+        "ibv_get_device_name",
+        "ibv_query_device",
+        "ibv_query_port_ex",
+        "ibv_rate_to_mbps",
+        "ibv_rate_to_mult"
+      ],
+      "sequence": [
+        "ibv_query_device",
+        "ibv_query_port_ex",
+        "ibv_get_device_name",
+        "ibv_rate_to_mbps",
+        "ibv_rate_to_mult"
+      ],
+      "known_issue": "",
+      "description": "Beyond vat_device_enum: ibv_query_device (full device_attr: atomic_cap, max_qp/mr/srq), ibv_get_device_name, ibv_query_port_ex (extended port attrs), rate helpers. Report the capability matrix that gates the CONDITIONAL tests (atomics, SRQ, DEVX).",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib + GDA-KI wrapper (ibv_query_device/port_ex)",
+      "scenario_key": "vat_device_caps_probe",
+      "match_names": [
+        "vat_device_caps_probe",
+        "VAT-080"
+      ]
+    },
+    {
+      "id": "VAT-090",
+      "title": "vat_mlx5dv_device_probe",
+      "area": "mlx5dv",
+      "class": "CONDITIONAL",
+      "gate": "mlx5 NIC",
+      "signal_apis": [
+        "mlx5dv_init_obj",
+        "mlx5dv_is_supported",
+        "mlx5dv_query_device"
+      ],
+      "sequence": [
+        "mlx5dv_is_supported",
+        "mlx5dv_query_device",
+        "mlx5dv_init_obj"
+      ],
+      "known_issue": "",
+      "description": "Probe the mlx5 Direct-Verbs provider: mlx5dv_is_supported(device) -> mlx5dv_query_device -> mlx5dv_init_obj to obtain low-level QP/CQ objects. Verify the provider initializes and reports caps. SKIP on non-mlx5 NICs.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL misc/mlx5dvwrap.cc; net_ib/gdaki doca_verbs_mlx5dv_wrapper.h",
+      "scenario_key": "vat_mlx5dv_device_probe",
+      "match_names": [
+        "vat_mlx5dv_device_probe",
+        "VAT-090"
+      ]
+    },
+    {
+      "id": "VAT-091",
+      "title": "vat_mlx5dv_dmabuf_mr",
+      "area": "datapath-gpu",
+      "class": "CONDITIONAL",
+      "gate": "mlx5 + dmabuf",
+      "signal_apis": [
+        "ibv_poll_cq",
+        "ibv_post_send",
+        "mlx5dv_reg_dmabuf_mr"
+      ],
+      "sequence": [
+        "mlx5dv_reg_dmabuf_mr",
+        "ibv_post_send",
+        "ibv_poll_cq"
+      ],
+      "known_issue": "",
+      "description": "mlx5dv_reg_dmabuf_mr - the Mellanox-specific GPU-dmabuf registration RCCL uses as an alternative to ibv_reg_dmabuf_mr. Register GPU memory, RDMA_WRITE, verify. SKIP with reason on EOPNOTSUPP/EPROTONOSUPPORT. Distinct driver path from generic vat_dmabuf_mr.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL transport/net_ib.cc (mlx5dv_reg_dmabuf_mr)",
+      "scenario_key": "vat_mlx5dv_dmabuf_mr",
+      "match_names": [
+        "vat_mlx5dv_dmabuf_mr",
+        "VAT-091"
+      ]
+    },
+    {
+      "id": "VAT-092",
+      "title": "vat_devx_obj_lifecycle",
+      "area": "mlx5dv",
+      "class": "CONDITIONAL",
+      "gate": "DEVX (mlx5)",
+      "signal_apis": [
+        "mlx5dv_devx_general_cmd",
+        "mlx5dv_devx_obj_create",
+        "mlx5dv_devx_obj_destroy",
+        "mlx5dv_devx_obj_modify",
+        "mlx5dv_devx_obj_query",
+        "mlx5dv_devx_query_eqn"
+      ],
+      "sequence": [
+        "mlx5dv_devx_obj_create",
+        "mlx5dv_devx_obj_query",
+        "mlx5dv_devx_obj_modify",
+        "mlx5dv_devx_obj_destroy",
+        "mlx5dv_devx_general_cmd",
+        "mlx5dv_devx_query_eqn"
+      ],
+      "known_issue": "",
+      "description": "DEVX object lifecycle: obj_create -> obj_query -> obj_modify -> obj_destroy, plus devx_general_cmd and devx_query_eqn. The DEVX command path the GDA-KI backend builds QPs/CQs on. SKIP if DEVX unavailable.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib/gdaki doca_verbs_mlx5dv_wrapper.h (DEVX)",
+      "scenario_key": "vat_devx_obj_lifecycle",
+      "match_names": [
+        "vat_devx_obj_lifecycle",
+        "VAT-092"
+      ]
+    },
+    {
+      "id": "VAT-093",
+      "title": "vat_devx_uar_umem",
+      "area": "mlx5dv",
+      "class": "CONDITIONAL",
+      "gate": "DEVX (mlx5)",
+      "signal_apis": [
+        "mlx5dv_devx_alloc_uar",
+        "mlx5dv_devx_free_uar",
+        "mlx5dv_devx_umem_dereg",
+        "mlx5dv_devx_umem_reg",
+        "mlx5dv_devx_umem_reg_ex"
+      ],
+      "sequence": [
+        "mlx5dv_devx_alloc_uar",
+        "mlx5dv_devx_free_uar",
+        "mlx5dv_devx_umem_reg",
+        "mlx5dv_devx_umem_reg_ex",
+        "mlx5dv_devx_umem_dereg"
+      ],
+      "known_issue": "",
+      "description": "DEVX resource mapping: devx_alloc_uar/free_uar (UAR doorbell pages) and devx_umem_reg/reg_ex/dereg (user-memory registration). Verify alloc/register/teardown round-trips. SKIP if DEVX unavailable.",
+      "verify": "Scenario completes correctly; SKIP cleanly when the gated capability is absent.",
+      "impl_hint": "",
+      "provenance_hint": "RCCL net_ib/gdaki doca_verbs_mlx5dv_wrapper.h (DEVX UAR/umem)",
+      "scenario_key": "vat_devx_uar_umem",
+      "match_names": [
+        "vat_devx_uar_umem",
+        "VAT-093"
+      ]
+    }
+  ]
+}

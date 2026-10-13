@@ -1,0 +1,1054 @@
+{
+ "_meta": {
+  "name": "HIP acceptance requirements knowledge base",
+  "purpose": "Curated standard of HIP acceptance scenarios so the skill is self-contained: it does not need an external test plan to know what SHOULD be tested. Each entry is matched against (a) the target source's API usage and (b) what the local/peer test corpus already covers, to decide whether to PROPOSE the test. Grows over time.",
+  "epic": "HIP acceptance (Step 1)",
+  "classes": {
+   "MUST-PASS": "Hard baseline; capability officially supported. Missing => FAIL, not skip.",
+   "CONDITIONAL": "Version/capability gated; skip allowed but log reason + record gate.",
+   "REGRESSION": "Targets a known issue; a hang/timeout/crash is the signal."
+  },
+  "fields": "id, title, area, class, gate, signal_apis[], sequence[], known_issue, description, verify, impl_hint, provenance_hint"
+ },
+ "requirements": [
+  {
+   "id": "HIPACC-001",
+   "title": "HipMalloc_Free_Integrity",
+   "area": "memory-baseline",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipMalloc",
+    "hipMemcpy",
+    "hipFree"
+   ],
+   "sequence": [
+    "hipMalloc",
+    "kernel write pattern",
+    "hipMemcpy DtoH",
+    "verify",
+    "hipFree"
+   ],
+   "known_issue": "",
+   "description": "Baseline device-memory floor: allocate with hipMalloc, write a known pattern from a GPU kernel, copy back, verify. If this fails nothing else matters.",
+   "verify": "Pattern read back matches written; no HIP error.",
+   "impl_hint": "Single GPU. Tiny kernel filling buf[i]=seed+i; compare on host.",
+   "provenance_hint": "universal HIP baseline",
+   "scenario_key": "HipMalloc_Free_Integrity",
+   "match_names": [
+    "HipMalloc_Free_Integrity",
+    "HIPACC-001"
+   ]
+  },
+  {
+   "id": "HIPACC-002",
+   "title": "HostAlloc_Pinned",
+   "area": "host-memory",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipHostMalloc",
+    "hipHostFree",
+    "hipHostGetDevicePointer"
+   ],
+   "sequence": [
+    "hipHostMalloc",
+    "host write",
+    "hipHostGetDevicePointer",
+    "kernel read",
+    "hipHostFree"
+   ],
+   "known_issue": "",
+   "description": "Allocate/free pinned host memory used for host-side backup buffers; verify host-accessible and a device pointer is obtainable.",
+   "verify": "Device sees host writes via the mapped device pointer.",
+   "impl_hint": "Flags hipHostMallocMapped; optionally WriteCombined/Uncached variants.",
+   "provenance_hint": "RCCL alloc.h host backup buffers",
+   "scenario_key": "HostAlloc_Pinned",
+   "match_names": [
+    "HostAlloc_Pinned",
+    "HIPACC-002"
+   ]
+  },
+  {
+   "id": "HIPACC-003",
+   "title": "Vmm_Granularity",
+   "area": "vmm",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=6.4",
+   "signal_apis": [
+    "hipMemGetAllocationGranularity"
+   ],
+   "sequence": [
+    "build Pinned+Device POSIX-fd alloc prop",
+    "hipMemGetAllocationGranularity(min)",
+    "round a size up to it",
+    "check consistency"
+   ],
+   "known_issue": "",
+   "description": "Verify hipMemGetAllocationGranularity returns a non-zero minimum granularity for a Pinned+Device POSIX-fd allocation prop and that size rounding to that granularity is consistent. The first call in every VMM flow, so a regression here breaks all VMM tests downstream.",
+   "verify": "Granularity > 0; size rounding is consistent.",
+   "impl_hint": "Same prop used by Vmm_Create_Map_Roundtrip.",
+   "provenance_hint": "RCCL allocator.cc / include/alloc.h (VMM prop)",
+   "scenario_key": "Vmm_Granularity",
+   "match_names": [
+    "Vmm_Granularity",
+    "HIPACC-003"
+   ]
+  },
+  {
+   "id": "HIPACC-004",
+   "title": "Vmm_SetGetAccess",
+   "area": "vmm",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=6.4",
+   "signal_apis": [
+    "hipMemSetAccess",
+    "hipMemGetAccess"
+   ],
+   "sequence": [
+    "VMM map a buffer",
+    "hipMemSetAccess(RW)",
+    "hipMemGetAccess",
+    "assert RW reported for the device"
+   ],
+   "known_issue": "",
+   "description": "After hipMemSetAccess with read-write protection, verify hipMemGetAccess reports read-write for the device. Confirms access descriptors are applied and queryable, not silently dropped.",
+   "verify": "GetAccess returns read-write for the device.",
+   "impl_hint": "Extends the Create_Map flow with an explicit get-access check.",
+   "provenance_hint": "RCCL VMM access descriptors",
+   "scenario_key": "Vmm_SetGetAccess",
+   "match_names": [
+    "Vmm_SetGetAccess",
+    "HIPACC-004"
+   ]
+  },
+  {
+   "id": "HIPACC-005",
+   "title": "Vmm_Negative_ZeroSize_Unaligned",
+   "area": "vmm",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=6.4",
+   "signal_apis": [
+    "hipMemCreate",
+    "hipMemAddressReserve"
+   ],
+   "sequence": [
+    "hipMemCreate(size=0) -> expect clean error",
+    "hipMemAddressReserve(unaligned) -> expect clean error",
+    "assert no crash"
+   ],
+   "known_issue": "",
+   "description": "Negative paths: a zero-size hipMemCreate and an unaligned hipMemAddressReserve must return a clean HIP error code without crashing. Confirms argument validation, not undefined behavior.",
+   "verify": "Both calls return an error code; process does not crash.",
+   "impl_hint": "Negative-path test; assert error, not success.",
+   "provenance_hint": "RCCL VMM arg validation",
+   "scenario_key": "Vmm_Negative_ZeroSize_Unaligned",
+   "match_names": [
+    "Vmm_Negative_ZeroSize_Unaligned",
+    "HIPACC-005"
+   ]
+  },
+  {
+   "id": "HIPACC-006",
+   "title": "Vmm_Uncached_Type",
+   "area": "vmm",
+   "class": "CONDITIONAL",
+   "gate": "ROCm>=7.12",
+   "signal_apis": [
+    "hipMemCreate",
+    "hipMemMap"
+   ],
+   "sequence": [
+    "hipMemCreate(hipMemAllocationTypeUncached)",
+    "map",
+    "kernel write/read integrity"
+   ],
+   "known_issue": "",
+   "description": "Create, map, and run a write/read integrity check on a VMM allocation declared with hipMemAllocationTypeUncached, the cache-bypassing buffer type. Confirms the uncached allocation path is honored without corruption.",
+   "verify": "Data integrity on the uncached buffer; SKIP if unsupported.",
+   "impl_hint": "Gate on uncached type support.",
+   "provenance_hint": "RCCL VMM uncached path",
+   "scenario_key": "Vmm_Uncached_Type",
+   "match_names": [
+    "Vmm_Uncached_Type",
+    "HIPACC-006"
+   ]
+  },
+  {
+   "id": "HIPACC-007",
+   "title": "MallocAsync_FreeAsync",
+   "area": "mempool",
+   "class": "CONDITIONAL",
+   "gate": "mempool supported",
+   "signal_apis": [
+    "hipMallocAsync",
+    "hipFreeAsync"
+   ],
+   "sequence": [
+    "hipMallocAsync(non-blocking stream)",
+    "kernel write/read",
+    "hipFreeAsync",
+    "hipStreamSynchronize",
+    "integrity check"
+   ],
+   "known_issue": "",
+   "description": "Stream-ordered allocation: hipMallocAsync and hipFreeAsync on a non-blocking stream followed by a stream synchronize, with a write/read integrity check. SKIP if the device does not advertise memory-pool support. Backs the async allocator path.",
+   "verify": "Integrity holds; SKIP if no mempool support.",
+   "impl_hint": "Non-blocking stream.",
+   "provenance_hint": "RCCL async allocator",
+   "scenario_key": "MallocAsync_FreeAsync",
+   "match_names": [
+    "MallocAsync_FreeAsync",
+    "HIPACC-007"
+   ]
+  },
+  {
+   "id": "HIPACC-008",
+   "title": "MemPool_Alloc",
+   "area": "mempool",
+   "class": "CONDITIONAL",
+   "gate": "mempool supported",
+   "signal_apis": [
+    "hipMemPoolCreate",
+    "hipMallocFromPoolAsync",
+    "hipMemPoolDestroy"
+   ],
+   "sequence": [
+    "hipMemPoolCreate",
+    "hipMallocFromPoolAsync",
+    "use",
+    "hipMemPoolDestroy"
+   ],
+   "known_issue": "",
+   "description": "Create an explicit memory pool (hipMemPoolCreate), allocate from it (hipMallocFromPoolAsync), use it, and destroy the pool (hipMemPoolDestroy). SKIP if the device does not advertise memory-pool support.",
+   "verify": "Pool alloc/use/destroy succeed; SKIP if no mempool support.",
+   "impl_hint": "Base mempool lifecycle; MemPool_SetAttribute extends it.",
+   "provenance_hint": "RCCL allocator (mempool)",
+   "scenario_key": "MemPool_Alloc",
+   "match_names": [
+    "MemPool_Alloc",
+    "HIPACC-008"
+   ]
+  },
+  {
+   "id": "HIPACC-010",
+   "title": "Vmm_Create_Map_Roundtrip",
+   "area": "vmm",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=6.4",
+   "signal_apis": [
+    "hipMemGetAllocationGranularity",
+    "hipMemCreate",
+    "hipMemAddressReserve",
+    "hipMemMap",
+    "hipMemSetAccess",
+    "hipMemUnmap",
+    "hipMemRelease",
+    "hipMemAddressFree"
+   ],
+   "sequence": [
+    "hipMemGetAllocationGranularity",
+    "hipMemCreate(Pinned+Device+POSIX fd)",
+    "hipMemAddressReserve",
+    "hipMemMap",
+    "hipMemSetAccess",
+    "kernel write/read verify",
+    "hipMemUnmap",
+    "hipMemRelease",
+    "hipMemAddressFree"
+   ],
+   "known_issue": "",
+   "description": "Full virtual-memory-management lifecycle on raw HIP. The core primitive RCCL's memory manager (suspend/resume) is built on.",
+   "verify": "Data integrity through the mapped VA; clean teardown with no leak/err.",
+   "impl_hint": "Use POSIX-fd handle type. This is a SEQUENCE test: hip-tests unit-tests each call, acceptance tests the whole chain.",
+   "provenance_hint": "RCCL allocator.cc ncclMemAlloc_impl; include/alloc.h",
+   "scenario_key": "Vmm_Create_Map_Roundtrip",
+   "match_names": [
+    "Vmm_Create_Map_Roundtrip",
+    "HIPACC-010"
+   ]
+  },
+  {
+   "id": "HIPACC-011",
+   "title": "Vmm_GpuDirectRDMACapable_MultiMap",
+   "area": "vmm",
+   "class": "REGRESSION",
+   "gate": "ROCm>=6.4",
+   "signal_apis": [
+    "hipMemCreate",
+    "hipMemMap"
+   ],
+   "sequence": [
+    "loop x16: hipMemCreate(gpuDirectRDMACapable=1)",
+    "hipMemAddressReserve",
+    "hipMemMap",
+    "assert no crash"
+   ],
+   "known_issue": "ROCM-2550",
+   "description": "Allocate+map 16 VMM buffers with gpuDirectRDMACapable=1; assert no crash. Without the flag hipMemMap SIGSEGVs after several allocations. Add a flag=0 variant to check whether the SIGSEGV still reproduces.",
+   "verify": "No SIGSEGV after repeated maps; flag=0 variant documents current driver behavior.",
+   "impl_hint": "STRESS/scale test (loop). The =0 variant is the regression probe.",
+   "provenance_hint": "RCCL allocator.cc (ROCM-2550 workaround)",
+   "scenario_key": "Vmm_GpuDirectRDMACapable_MultiMap",
+   "match_names": [
+    "Vmm_GpuDirectRDMACapable_MultiMap",
+    "HIPACC-011"
+   ]
+  },
+  {
+   "id": "HIPACC-012",
+   "title": "Vmm_PosixFd_Export_Import",
+   "area": "vmm-ipc",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=7.0",
+   "signal_apis": [
+    "hipMemRetainAllocationHandle",
+    "hipMemExportToShareableHandle",
+    "hipMemImportFromShareableHandle",
+    "hipMemMap"
+   ],
+   "sequence": [
+    "rank0: hipMemRetainAllocationHandle",
+    "hipMemExportToShareableHandle",
+    "send fd via OOB",
+    "rank1: recv",
+    "hipMemImportFromShareableHandle",
+    "hipMemMap",
+    "verify data",
+    "close fd"
+   ],
+   "known_issue": "",
+   "description": "Export a VMM allocation to a POSIX fd, import on a peer, map, verify data across the import. Backs cross-rank peer buffer sharing.",
+   "verify": "Importer reads the exporter's written pattern.",
+   "impl_hint": "Multi-process; needs an OOB channel (socket/MPI) to pass the fd (SCM_RIGHTS for true cross-process fd).",
+   "provenance_hint": "RCCL p2p.cc ncclP2pImportShareableBuffer",
+   "scenario_key": "Vmm_PosixFd_Export_Import",
+   "match_names": [
+    "Vmm_PosixFd_Export_Import",
+    "HIPACC-012"
+   ]
+  },
+  {
+   "id": "HIPACC-013",
+   "title": "Vmm_Fabric_Export_Import",
+   "area": "vmm-ipc",
+   "class": "CONDITIONAL",
+   "gate": "ROCm>=7.12",
+   "signal_apis": [
+    "hipMemExportToShareableHandle",
+    "hipMemImportFromShareableHandle"
+   ],
+   "sequence": [
+    "export hipMemFabricHandle",
+    "import",
+    "map",
+    "verify"
+   ],
+   "known_issue": "",
+   "description": "Export/import a fabric handle, map, verify. SKIP when driver/topology reports fabric handles unsupported.",
+   "verify": "Data visible across fabric import, or coordinated skip.",
+   "impl_hint": "Gate on fabric-handle support probe.",
+   "provenance_hint": "RCCL mnnvl / fabric path",
+   "scenario_key": "Vmm_Fabric_Export_Import",
+   "match_names": [
+    "Vmm_Fabric_Export_Import",
+    "HIPACC-013"
+   ]
+  },
+  {
+   "id": "HIPACC-014",
+   "title": "Vmm_Map_NoDeadlock_KernelInFlight",
+   "area": "vmm",
+   "class": "REGRESSION",
+   "gate": "ROCm>=7.0",
+   "signal_apis": [
+    "hipMemMap",
+    "hipMemUnmap"
+   ],
+   "sequence": [
+    "launch kernel spinning on null stream polling a host flag",
+    "host: hipMemMap on a separate VMM alloc under watchdog",
+    "then set flag to release kernel",
+    "assert hipMemMap returned within timeout"
+   ],
+   "known_issue": "ROCM-25387",
+   "description": "hipMemMap is documented host-only but CLR waits synchronously; with a collective kernel in flight the wait is transitively gated by that kernel -> closed dependency cycle that deadlocked multi-segment IPC registration at >=8 ranks. A hang/timeout is the regression signal.",
+   "verify": "hipMemMap/Unmap return within the watchdog window.",
+   "impl_hint": "Needs a watchdog thread; the kernel must busy-wait on a host-set flag.",
+   "provenance_hint": "RCCL p2p.cc multi-segment IPC; ROCM-25387",
+   "scenario_key": "Vmm_Map_NoDeadlock_KernelInFlight",
+   "match_names": [
+    "Vmm_Map_NoDeadlock_KernelInFlight",
+    "HIPACC-014"
+   ]
+  },
+  {
+   "id": "HIPACC-020",
+   "title": "Ipc_Legacy_GetOpen_RoundTrip",
+   "area": "ipc",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipIpcGetMemHandle",
+    "hipIpcOpenMemHandle",
+    "hipIpcCloseMemHandle"
+   ],
+   "sequence": [
+    "proc0: hipMalloc + kernel write pattern",
+    "hipIpcGetMemHandle",
+    "publish 64-byte handle via shm_open/mmap (handle is byte-copyable)",
+    "fork(): proc1",
+    "proc1: hipIpcOpenMemHandle(handle, hipIpcMemLazyEnablePeerAccess)",
+    "kernel read / verify pattern",
+    "hipIpcCloseMemHandle"
+   ],
+   "known_issue": "",
+   "description": "REAL cross-process (separate address spaces, not in-process, not just MPI-rank) legacy IPC: the hipIpc mem handle is a byte-copyable blob, so it can travel through shared memory between forked processes. RCCL keeps this path as a fallback beside VMM-fd.",
+   "verify": "The other PROCESS reads the originator's pattern through the opened handle; closing on both sides is clean.",
+   "impl_hint": "True multi-process via fork()+shm_open/mmap (or exec). Handle copies by value. Mirror hip-tests multiproc/hipIpcMemAccessTest.cc (mmap MAP_SHARED + sem_post handoff). Contrast HIPACC-021/022 where the handle is NOT byte-copyable.",
+   "provenance_hint": "RCCL p2p.cc; hip-tests multiproc/hipIpcMemAccessTest.cc",
+   "scenario_key": "Ipc_Legacy_GetOpen_RoundTrip",
+   "match_names": [
+    "Ipc_Legacy_GetOpen_RoundTrip",
+    "HIPACC-020"
+   ]
+  },
+  {
+   "id": "HIPACC-021",
+   "title": "Vmm_PosixFd_CrossProcess_pidfd",
+   "area": "ipc-crossproc",
+   "class": "CONDITIONAL",
+   "gate": "ROCm>=7.0; Linux pidfd_getfd (kernel>=5.6) + PR_SET_PTRACER",
+   "signal_apis": [
+    "hipMemExportToShareableHandle",
+    "hipMemImportFromShareableHandle",
+    "hipMemMap"
+   ],
+   "sequence": [
+    "proc0: VMM alloc (hipMemCreate POSIX-fd) + write pattern",
+    "hipMemExportToShareableHandle -> int fd",
+    "publish {pid, fd-number} via shm/socket",
+    "proc1: open pidfd of proc0",
+    "pidfd_getfd(pidfd, fd, 0) -> local fd (the POSIX fd is NOT byte-copyable across processes)",
+    "hipMemImportFromShareableHandle(local fd) -> handle",
+    "hipMemAddressReserve/Map/SetAccess",
+    "kernel verify"
+   ],
+   "known_issue": "",
+   "description": "REAL cross-process sharing of a VMM POSIX-fd allocation. Unlike the legacy hipIpc handle, a POSIX fd is a per-process object and cannot be memcpy'd between processes -> it must be transferred (pidfd_getfd, or SCM_RIGHTS over a unix socket). This is the actual mechanism rocSHMEM uses. The most regression-prone cross-process path (depends on kernel pidfd support + ptrace yama policy).",
+   "verify": "Importer PROCESS reads exporter's pattern through the imported+mapped fd. SKIP with reason if pidfd_getfd unavailable.",
+   "impl_hint": "proc0 calls prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY) so proc1 may pidfd_getfd it. Alternative transfer: SCM_RIGHTS over AF_UNIX socket. Do NOT just pass the integer fd value across processes - that is a different (wrong) fd in proc1.",
+   "provenance_hint": "rocSHMEM src/memory/hip_allocator_vmm_posix.cpp (PR_SET_PTRACER), :166 (export), :207 (pidfd_getfd), :224 (import)",
+   "scenario_key": "Vmm_PosixFd_CrossProcess_pidfd",
+   "match_names": [
+    "Vmm_PosixFd_CrossProcess_pidfd",
+    "HIPACC-021"
+   ]
+  },
+  {
+   "id": "HIPACC-022",
+   "title": "Vmm_Fabric_CrossProcess",
+   "area": "ipc-crossproc",
+   "class": "CONDITIONAL",
+   "gate": "ROCm>=7.12; fabric handles supported by driver/topology",
+   "signal_apis": [
+    "hipMemExportToShareableHandle",
+    "hipMemImportFromShareableHandle",
+    "hipMemMap"
+   ],
+   "sequence": [
+    "proc0: VMM alloc + write pattern",
+    "hipMemExportToShareableHandle -> hipMemFabricHandle_t (byte-copyable, process-portable)",
+    "publish the fabric handle bytes via shm/socket/OOB",
+    "proc1: hipMemImportFromShareableHandle(fabric handle)",
+    "hipMemMap/SetAccess",
+    "kernel verify"
+   ],
+   "known_issue": "",
+   "description": "REAL cross-process sharing via a fabric handle. Unlike the POSIX fd, a fabric handle IS byte-copyable and process/node-portable (no pidfd/SCM_RIGHTS needed) - the contrast case. SKIP when fabric handles are unsupported.",
+   "verify": "Importer PROCESS reads exporter's pattern; coordinated skip if fabric unsupported.",
+   "impl_hint": "Same handoff as a plain blob (it is just bytes), but gate on fabric support. The point of this test vs HIPACC-021 is to prove the fabric path works WITHOUT fd transfer.",
+   "provenance_hint": "rocSHMEM src/memory/hip_allocator_vmm_fabric.cpp (export), :161/169 (import)",
+   "scenario_key": "Vmm_Fabric_CrossProcess",
+   "match_names": [
+    "Vmm_Fabric_CrossProcess",
+    "HIPACC-022"
+   ]
+  },
+  {
+   "id": "HIPACC-030",
+   "title": "Event_DisableTiming_CrossStream_Sync",
+   "area": "streams-events",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipEventCreateWithFlags",
+    "hipEventRecord",
+    "hipStreamWaitEvent"
+   ],
+   "sequence": [
+    "hipEventCreateWithFlags(hipEventDisableTiming)",
+    "kernel write on stream A",
+    "hipEventRecord(A)",
+    "hipStreamWaitEvent(B,event)",
+    "reader kernel on B",
+    "verify B saw A's write"
+   ],
+   "known_issue": "",
+   "description": "Lazy cross-stream dependency RCCL installs on a detected stream change. The chain (not the single call) is the scenario.",
+   "verify": "B observes A's write; regression = B proceeds early.",
+   "impl_hint": "Two streams; event with timing disabled.",
+   "provenance_hint": "RCCL init.cc, enqueue.cc",
+   "scenario_key": "Event_DisableTiming_CrossStream_Sync",
+   "match_names": [
+    "Event_DisableTiming_CrossStream_Sync",
+    "HIPACC-030"
+   ]
+  },
+  {
+   "id": "HIPACC-031",
+   "title": "Launch_DynShared_FuncAttr",
+   "area": "kernel-launch",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipDeviceGetAttribute",
+    "hipFuncGetAttributes",
+    "hipFuncSetAttribute"
+   ],
+   "sequence": [
+    "hipDeviceGetAttribute(MaxSharedMemoryPerBlockOptin)",
+    "hipFuncGetAttributes",
+    "hipFuncSetAttribute(MaxDynamicSharedMemorySize)",
+    "launch with that dyn-shmem",
+    "hipGetLastError"
+   ],
+   "known_issue": "",
+   "description": "Per-device kernel init: raise the dynamic shared-memory cap then launch using it. A regression silently caps collective shared memory.",
+   "verify": "Kernel launches and runs with the raised dyn-shmem; no launch error.",
+   "impl_hint": "Set opt-in shmem above the static default.",
+   "provenance_hint": "RCCL enqueue.cc ncclInitKernelsForDevice",
+   "scenario_key": "Launch_DynShared_FuncAttr",
+   "match_names": [
+    "Launch_DynShared_FuncAttr",
+    "HIPACC-031"
+   ]
+  },
+  {
+   "id": "HIPACC-040",
+   "title": "Ce_BatchCopy_Ordered",
+   "area": "copy",
+   "class": "CONDITIONAL",
+   "gate": "driver>=71200000 OR [70051831,70060000)",
+   "signal_apis": [
+    "hipMemcpyBatchAsync",
+    "hipEventRecord",
+    "hipStreamWaitEvent",
+    "hipMemcpyAsync"
+   ],
+   "sequence": [
+    "hipMemcpyBatchAsync(attrs SrcAccessOrderStream + PreferOverlapWithCompute)",
+    "hipEventRecord",
+    "hipStreamWaitEvent",
+    "hipMemcpyAsync",
+    "verify"
+   ],
+   "known_issue": "",
+   "description": "Runtime-gated CE batch-copy path with event ordering. SKIP+reason outside the supported driver range. A prime FW/driver regression candidate.",
+   "verify": "Batched result correct; coordinated skip when gate not met.",
+   "impl_hint": "Replicate ncclCeBatchAsyncSupported() version check verbatim.",
+   "provenance_hint": "RCCL ce_coll.cc",
+   "scenario_key": "Ce_BatchCopy_Ordered",
+   "match_names": [
+    "Ce_BatchCopy_Ordered",
+    "HIPACC-040"
+   ]
+  },
+  {
+   "id": "HIPACC-050",
+   "title": "Device_CanAccessPeer_Matrix",
+   "area": "peer",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipDeviceCanAccessPeer",
+    "hipDeviceEnablePeerAccess"
+   ],
+   "sequence": [
+    "for all GPU pairs: hipDeviceCanAccessPeer",
+    "hipDeviceEnablePeerAccess (tolerate already-enabled)",
+    "peer hipMemcpyAsync",
+    "verify"
+   ],
+   "known_issue": "",
+   "description": "P2P capability matrix across all GPU pairs on a node, then a peer copy. RCCL disables an LL optimization if any pair lacks P2P.",
+   "verify": "Reported matrix matches achievable peer copies.",
+   "impl_hint": "Multi-GPU single-node; clear hipGetLastError after enable.",
+   "provenance_hint": "RCCL init.cc, p2p.cc",
+   "scenario_key": "Device_CanAccessPeer_Matrix",
+   "match_names": [
+    "Device_CanAccessPeer_Matrix",
+    "HIPACC-050"
+   ]
+  },
+  {
+   "id": "HIPACC-060",
+   "title": "Gdr_HandleForAddressRange_Export",
+   "area": "mixed-hip-verbs",
+   "class": "MUST-PASS",
+   "gate": "ROCm>=7.12 / backport",
+   "signal_apis": [
+    "hipMemGetHandleForAddressRange",
+    "hsa_amd_portable_export_dmabuf"
+   ],
+   "sequence": [
+    "hipMalloc/VMM buffer",
+    "hipMemGetHandleForAddressRange",
+    "hsa_amd_portable_export_dmabuf -> fd+offset"
+   ],
+   "known_issue": "",
+   "description": "The HIP->Verbs handoff: obtain a dmabuf fd+offset for a GPU buffer for NIC GDR registration. Foundational for HIP/Verbs MIXED scenarios.",
+   "verify": "Valid fd+offset returned; later registerable by ibv_reg_dmabuf_mr (mixed test).",
+   "impl_hint": "dlopen/dlsym the hsa symbol; skip if absent.",
+   "provenance_hint": "RCCL net.cc",
+   "scenario_key": "Gdr_HandleForAddressRange_Export",
+   "match_names": [
+    "Gdr_HandleForAddressRange_Export",
+    "HIPACC-060"
+   ]
+  },
+  {
+   "id": "HIPACC-070",
+   "title": "Capture_Dependency_Update_Chain",
+   "area": "graph-capture",
+   "class": "CONDITIONAL",
+   "gate": "capture-dep v2 APIs",
+   "signal_apis": [
+    "hipStreamGetCaptureInfo_v3",
+    "hipGraphAddDependencies_v2",
+    "hipStreamUpdateCaptureDependencies_v2"
+   ],
+   "sequence": [
+    "begin capture",
+    "hipStreamGetCaptureInfo_v3",
+    "hipGraphAddDependencies_v2",
+    "hipStreamUpdateCaptureDependencies_v2",
+    "instantiate+launch graph",
+    "verify"
+   ],
+   "known_issue": "",
+   "description": "Splice ordering into a captured graph using the versioned capture-dependency APIs, with the v2/non-v2 fallback RCCL carries.",
+   "verify": "Captured graph runs with the injected dependency; correct result.",
+   "impl_hint": "Gate on availability of the _v2/_v3 entry points.",
+   "provenance_hint": "RCCL strongstream.cc",
+   "scenario_key": "Capture_Dependency_Update_Chain",
+   "match_names": [
+    "Capture_Dependency_Update_Chain",
+    "HIPACC-070"
+   ]
+  },
+  {
+   "id": "HIPACC-080",
+   "title": "Symbol_Version_Detection",
+   "area": "platform-versioning",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipRuntimeGetVersion",
+    "hipDriverGetVersion"
+   ],
+   "sequence": [
+    "hipRuntimeGetVersion",
+    "hipDriverGetVersion",
+    "dlopen/dlsym optional HSA+cuMem symbols",
+    "report present/absent per symbol"
+   ],
+   "known_issue": "",
+   "description": "Dependency-tracking floor: report ROCm/HIP/driver versions and which optional symbols (hsa_amd_portable_export_dmabuf, cuMem family) resolve. Establishes version as a reported test dimension.",
+   "verify": "Versions reported; per-symbol presence table emitted (never fails, informational baseline).",
+   "impl_hint": "This test also gates many CONDITIONAL tests; run it first.",
+   "provenance_hint": "RCCL init.cc, rocmwrap.cc",
+   "scenario_key": "Symbol_Version_Detection",
+   "match_names": [
+    "Symbol_Version_Detection",
+    "HIPACC-080"
+   ]
+  },
+  {
+   "id": "HIPACC-090",
+   "title": "Device_Query_Basics",
+   "area": "device-mgmt",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipGetDevice",
+    "hipSetDevice",
+    "hipGetDeviceCount",
+    "hipGetDeviceProperties",
+    "hipDeviceGetAttribute",
+    "hipDeviceGetPCIBusId",
+    "hipDeviceGetByPCIBusId"
+   ],
+   "sequence": [
+    "hipGetDeviceCount",
+    "for each dev: hipSetDevice",
+    "hipGetDevice (confirm)",
+    "hipGetDeviceProperties",
+    "hipDeviceGetPCIBusId",
+    "hipDeviceGetByPCIBusId (round-trip)"
+   ],
+   "known_issue": "",
+   "description": "Basic device enumeration/selection floor RCCL does at init. Smoke: enumerate, select, read properties, PCI-bus-id round-trips.",
+   "verify": "Count>0; set/get device consistent; PCI bus id maps back to the same device.",
+   "impl_hint": "Pure smoke, single-node. No transfer.",
+   "provenance_hint": "RCCL init.cc (device enum/props)",
+   "scenario_key": "Device_Query_Basics",
+   "match_names": [
+    "Device_Query_Basics",
+    "HIPACC-090"
+   ]
+  },
+  {
+   "id": "HIPACC-091",
+   "title": "DeviceSetLimit_StackSize",
+   "area": "device-mgmt",
+   "class": "CONDITIONAL",
+   "gate": "",
+   "signal_apis": [
+    "hipDeviceSetLimit"
+   ],
+   "sequence": [
+    "hipDeviceSetLimit(hipLimitStackSize, N)",
+    "launch a kernel that uses deep stack",
+    "verify ok",
+    "optionally restore"
+   ],
+   "known_issue": "",
+   "description": "RCCL raises the device stack-size limit before launching kernels. Verify the limit is accepted and a stack-heavy kernel runs.",
+   "verify": "SetLimit returns success; kernel runs correctly under the raised limit.",
+   "impl_hint": "cudaLimitStackSize equivalent; RCCL sets it ignoring errors.",
+   "provenance_hint": "RCCL init.cc (cudaDeviceSetLimit cudaLimitStackSize)",
+   "scenario_key": "DeviceSetLimit_StackSize",
+   "match_names": [
+    "DeviceSetLimit_StackSize",
+    "HIPACC-091"
+   ]
+  },
+  {
+   "id": "HIPACC-092",
+   "title": "Event_Timing_Query_Elapsed",
+   "area": "streams-events",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipEventCreate",
+    "hipEventRecord",
+    "hipEventQuery",
+    "hipEventSynchronize",
+    "hipEventElapsedTime",
+    "hipEventDestroy"
+   ],
+   "sequence": [
+    "hipEventCreate start,stop (timing enabled)",
+    "hipEventRecord(start)",
+    "kernel",
+    "hipEventRecord(stop)",
+    "hipEventSynchronize(stop)",
+    "hipEventQuery",
+    "hipEventElapsedTime(start,stop)",
+    "hipEventDestroy"
+   ],
+   "known_issue": "",
+   "description": "Timing-enabled events (contrast HIPACC-030 which disables timing): record around a kernel, query completion, measure elapsed ms.",
+   "verify": "hipEventQuery reports complete after sync; elapsed time is a sane positive value.",
+   "impl_hint": "Timing path differs from disable-timing path; both must work.",
+   "provenance_hint": "RCCL recorder/collTrace (cudaEventQuery/ElapsedTime)",
+   "scenario_key": "Event_Timing_Query_Elapsed",
+   "match_names": [
+    "Event_Timing_Query_Elapsed",
+    "HIPACC-092"
+   ]
+  },
+  {
+   "id": "HIPACC-093",
+   "title": "HostRegister_Mapped_RoundTrip",
+   "area": "host-memory",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipHostRegister",
+    "hipHostGetDevicePointer",
+    "hipHostUnregister"
+   ],
+   "sequence": [
+    "malloc plain host buffer",
+    "hipHostRegister(Portable|Mapped[|Uncached])",
+    "hipHostGetDevicePointer",
+    "kernel writes via device ptr",
+    "verify on host",
+    "hipHostUnregister"
+   ],
+   "known_issue": "",
+   "description": "Register existing (non-pinned) host memory for device access \u2014 the SHM path RCCL uses. Distinct from hipHostMalloc.",
+   "verify": "Device writes through the registered mapping are visible on the host buffer.",
+   "impl_hint": "Flags Portable|Mapped, plus hipExtHostRegisterUncached variant RCCL uses.",
+   "provenance_hint": "RCCL misc/shmutils.cc (cudaHostRegister)",
+   "scenario_key": "HostRegister_Mapped_RoundTrip",
+   "match_names": [
+    "HostRegister_Mapped_RoundTrip",
+    "HIPACC-093"
+   ]
+  },
+  {
+   "id": "HIPACC-094",
+   "title": "LaunchHostFunc_StreamCallback",
+   "area": "streams-events",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipLaunchHostFunc"
+   ],
+   "sequence": [
+    "enqueue kernel on stream",
+    "hipLaunchHostFunc(stream, cb, arg)",
+    "hipStreamSynchronize",
+    "verify cb ran after the kernel"
+   ],
+   "known_issue": "",
+   "description": "Host callback enqueued in stream order \u2014 RCCL uses it for plan callbacks after launch. Verify the host fn fires in order, once.",
+   "verify": "Callback observed exactly once, after the preceding kernel completed.",
+   "impl_hint": "cb sets a host flag/counter; assert ordering vs kernel effect.",
+   "provenance_hint": "RCCL enqueue.cc (cudaLaunchHostFunc hostStreamPlanCallback)",
+   "scenario_key": "LaunchHostFunc_StreamCallback",
+   "match_names": [
+    "LaunchHostFunc_StreamCallback",
+    "HIPACC-094"
+   ]
+  },
+  {
+   "id": "HIPACC-095",
+   "title": "Graph_HostNode_Capture",
+   "area": "graph-capture",
+   "class": "CONDITIONAL",
+   "gate": "graph APIs present",
+   "signal_apis": [
+    "hipGraphAddHostNode",
+    "hipGraphAddEventRecordNode",
+    "hipGraphAddDependencies",
+    "hipUserObjectCreate",
+    "hipGraphRetainUserObject"
+   ],
+   "sequence": [
+    "create/capture a graph",
+    "hipGraphAddHostNode (+ params)",
+    "hipGraphAddEventRecordNode",
+    "hipGraphAddDependencies to order them",
+    "instantiate + launch",
+    "verify host node + event ran in order"
+   ],
+   "known_issue": "",
+   "description": "Explicit graph construction RCCL does for its recorder/log node: add a host node + event-record node with a dependency, run the graph.",
+   "verify": "Host node callback ran during graph launch in the declared order.",
+   "impl_hint": "Mirrors recorder.cc graph logging. Gate on graph API availability.",
+   "provenance_hint": "RCCL misc/recorder.cc (hipGraphAddHostNode)",
+   "scenario_key": "Graph_HostNode_Capture",
+   "match_names": [
+    "Graph_HostNode_Capture",
+    "HIPACC-095"
+   ]
+  },
+  {
+   "id": "HIPACC-096",
+   "title": "PointerGetAttributes_DeviceVsHost",
+   "area": "pointer-query",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipPointerGetAttributes",
+    "hipMemGetAddressRange"
+   ],
+   "sequence": [
+    "hipMalloc dev ptr; hipHostMalloc host ptr",
+    "hipPointerGetAttributes on each",
+    "assert type device vs host + correct device id",
+    "hipMemGetAddressRange(dev ptr) -> base/size (preinit base=null,size=0)"
+   ],
+   "known_issue": "ROCM-2696",
+   "description": "RCCL classifies buffers via pointer attributes and address range. Covers the ROCM-2696 null-init requirement for hipMemGetAddressRange.",
+   "verify": "Attributes report correct memory type/device; address range returns containing base/size; no crash.",
+   "impl_hint": "base=nullptr,size=0 before hipMemGetAddressRange (ROCM-2696).",
+   "provenance_hint": "RCCL recorder.cc (cudaPointerGetAttributes, hipMemGetAddressRange)",
+   "scenario_key": "PointerGetAttributes_DeviceVsHost",
+   "match_names": [
+    "PointerGetAttributes_DeviceVsHost",
+    "HIPACC-096"
+   ]
+  },
+  {
+   "id": "HIPACC-097",
+   "title": "Memset_Sync_Async",
+   "area": "copy",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipMemset",
+    "hipMemsetAsync"
+   ],
+   "sequence": [
+    "hipMalloc",
+    "hipMemset(buf, val, n)",
+    "hipMemsetAsync(buf2, val, n, stream)",
+    "hipStreamSynchronize",
+    "verify both buffers"
+   ],
+   "known_issue": "",
+   "description": "Sync and stream-ordered memset floor; RCCL zero-inits buffers on both paths.",
+   "verify": "Both buffers read back the set byte pattern.",
+   "impl_hint": "Trivial smoke; include async-on-stream variant.",
+   "provenance_hint": "RCCL gin/rma (hipMemset/Async)",
+   "scenario_key": "Memset_Sync_Async",
+   "match_names": [
+    "Memset_Sync_Async",
+    "HIPACC-097"
+   ]
+  },
+  {
+   "id": "HIPACC-098",
+   "title": "MallocManaged_Access",
+   "area": "memory-baseline",
+   "class": "CONDITIONAL",
+   "gate": "managed memory supported",
+   "signal_apis": [
+    "hipMallocManaged"
+   ],
+   "sequence": [
+    "hipMallocManaged(&p, n)",
+    "host writes p",
+    "kernel reads/writes p",
+    "hipDeviceSynchronize",
+    "host verifies",
+    "hipFree"
+   ],
+   "known_issue": "",
+   "description": "Unified/managed allocation accessible from host and device. RCCL uses it for an alltoallv sizes array. SKIP if managed unsupported.",
+   "verify": "Host and device see each other's writes to the managed buffer.",
+   "impl_hint": "hipMemAttachGlobal; gate on DirectManagedMemAccessFromHost.",
+   "provenance_hint": "RCCL enqueue.cc (hipMallocManaged)",
+   "scenario_key": "MallocManaged_Access",
+   "match_names": [
+    "MallocManaged_Access",
+    "HIPACC-098"
+   ]
+  },
+  {
+   "id": "HIPACC-099",
+   "title": "ExtMalloc_FineGrain",
+   "area": "memory-baseline",
+   "class": "CONDITIONAL",
+   "gate": "fine-grain supported",
+   "signal_apis": [
+    "hipExtMallocWithFlags"
+   ],
+   "sequence": [
+    "hipExtMallocWithFlags(FineGrained)",
+    "kernel + host coherent updates without explicit copy",
+    "verify",
+    "hipFree"
+   ],
+   "known_issue": "",
+   "description": "Fine-grained device allocation (coherent, used for signals/flags). SKIP if unsupported on the device.",
+   "verify": "Coherent visibility of updates between host and device on the fine-grain buffer.",
+   "impl_hint": "hipDeviceMallocFinegrained flag.",
+   "provenance_hint": "RCCL allocator/alloc.h (hipExtMallocWithFlags)",
+   "scenario_key": "ExtMalloc_FineGrain",
+   "match_names": [
+    "ExtMalloc_FineGrain",
+    "HIPACC-099"
+   ]
+  },
+  {
+   "id": "HIPACC-100",
+   "title": "MemPool_SetAttribute",
+   "area": "mempool",
+   "class": "CONDITIONAL",
+   "gate": "mempool supported",
+   "signal_apis": [
+    "hipMemPoolSetAttribute",
+    "hipMemPoolCreate",
+    "hipMallocFromPoolAsync"
+   ],
+   "sequence": [
+    "hipMemPoolCreate",
+    "hipMemPoolSetAttribute(ReuseFollowEventDependencies / ReleaseThreshold)",
+    "hipMallocFromPoolAsync + use + free",
+    "hipMemPoolDestroy"
+   ],
+   "known_issue": "",
+   "description": "Tune a memory pool attribute then allocate from it. Extends MemPool_Alloc with the attribute-set path RCCL uses.",
+   "verify": "Attribute set succeeds and pool alloc/free behaves under it.",
+   "impl_hint": "SKIP if no mempool support.",
+   "provenance_hint": "RCCL allocator (hipMemPoolSetAttribute)",
+   "scenario_key": "MemPool_SetAttribute",
+   "match_names": [
+    "MemPool_SetAttribute",
+    "HIPACC-100"
+   ]
+  },
+  {
+   "id": "HIPACC-101",
+   "title": "Memcpy_AllDirections_SyncAsync",
+   "area": "copy",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipMemcpy",
+    "hipMemcpyAsync"
+   ],
+   "sequence": [
+    "H2D: hipMemcpy(host->dev) + hipMemcpyAsync(host->dev,stream)",
+    "D2D: hipMemcpyAsync(dev->dev,stream) (RCCL's hot path, collectives.cc)",
+    "D2H: hipMemcpy(dev->host) (init.cc profile path)",
+    "hipStreamSynchronize",
+    "verify each"
+   ],
+   "known_issue": "",
+   "description": "Acceptance floor for plain memcpy across ALL directions and both sync/async forms: HostToDevice, DeviceToDevice (RCCL's dominant path), DeviceToHost. RCCL src mostly uses D2D (collectives temp buffers) + one D2H (profile), and stages H2D via kernels/VMM rather than copy \u2014 but a HW/driver acceptance test must still confirm all three directions work, since other consumers (NIXL/rocSHMEM) and the verify paths rely on them.",
+   "verify": "Each direction round-trips the byte pattern; async completes after stream sync.",
+   "impl_hint": "3 directions x {sync,async}. Distinct from Memset_Sync_Async (that is memset, this is memcpy).",
+   "provenance_hint": "RCCL collectives.cc (D2D), init.cc (D2H); H2D = acceptance floor",
+   "scenario_key": "Memcpy_AllDirections_SyncAsync",
+   "match_names": [
+    "Memcpy_AllDirections_SyncAsync",
+    "HIPACC-101"
+   ]
+  },
+  {
+   "id": "HIPACC-102",
+   "title": "Memcpy_Size_Sweep",
+   "area": "copy",
+   "class": "MUST-PASS",
+   "gate": "",
+   "signal_apis": [
+    "hipMemcpy",
+    "hipMemcpyAsync",
+    "hipMemcpyPeer",
+    "hipMemcpyPeerAsync"
+   ],
+   "sequence": [
+    "for size in {1B,3B,1KiB,64KiB,1MiB,16MiB,256MiB}:",
+    "  for mode in {sync,async}: H2D + D2D(same GPU) + D2H (+ P2P if peer-capable 2nd GPU)",
+    "  write position-dependent byte pattern, copy, hipStreamSynchronize (async), verify"
+   ],
+   "known_issue": "",
+   "description": "Stress/scale variant of plain memcpy: sweep increasing copy sizes (1B..256MiB incl. an odd-byte size) across H2D/D2H/D2D and cross-GPU P2P, in both sync and async modes, verifying a position-dependent pattern each time. Catches size-threshold/alignment/staging-path bugs a single fixed size misses. Distinct from Memcpy_AllDirections_SyncAsync (one size vs sweep).",
+   "verify": "Every (size,direction,mode) round-trips the byte pattern; P2P leg SKIPs when no peer-capable second GPU.",
+   "impl_hint": "Loop sizes x {sync,async}; reuse a per-size helper (sweep_one_size). P2P leg guarded by hipDeviceCanAccessPeer + enable_peer_access_idempotent. Emit per-leg bandwidth on result.perf under --kind perf.",
+   "provenance_hint": "RCCL loops device copies over varying message sizes; acceptance stress floor.",
+   "scenario_key": "Memcpy_Size_Sweep",
+   "match_names": [
+    "Memcpy_Size_Sweep",
+    "HIPACC-102"
+   ]
+  }
+ ]
+}

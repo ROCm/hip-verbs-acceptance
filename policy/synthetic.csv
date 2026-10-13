@@ -1,0 +1,17 @@
+syn_pass,MUST_PASS,,,,
+syn_fail,MUST_PASS,,,,
+syn_skip,MUST_PASS,,,,
+syn_crash_abort,MUST_PASS,,,,
+syn_crash_segv,MUST_PASS,,,,
+syn_hang,MUST_PASS,,,,
+syn_hang_ignore_sigterm,MUST_PASS,,,,
+syn_exit_nonzero,MUST_PASS,,,,
+syn_corrupt_result,MUST_PASS,,,,
+syn_spawn_grandchild_hang,MUST_PASS,,,,grandchild process-group kill regression
+syn_known_failure_fail,KNOWN_FAILURE,,fail,TICKET-1,known failure fixture
+syn_known_failure_pass,KNOWN_FAILURE,,fail,TICKET-2,fixture that unexpectedly passes
+syn_na,NA,,,,not applicable on synthetic vendor
+syn2_barrier,MUST_PASS,,,,
+syn2_r0fail_r1pass,MUST_PASS,,,,
+syn2_r0pass_r1passive,MUST_PASS,,,,
+# syn_unclassified intentionally omitted -> UNCLASSIFIED
