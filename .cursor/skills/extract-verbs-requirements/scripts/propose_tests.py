@@ -20,7 +20,7 @@ Usage:
   propose_tests.py --out DIR --kb KB.json --joined joined.tsv --corpus corpus.tsv \
                    [--corpus-roots A:B:C] [--src SRC_DIR]
 """
-import argparse, json, os, re, subprocess, sys
+import argparse, json, os, re, sys
 
 def read_tsv(path):
     rows = []
@@ -176,13 +176,22 @@ def main():
 
 def grep_context(src, sym):
     """Return up to 2 short code excerpts showing how `sym` is called."""
-    try:
-        out = subprocess.run(
-            ["grep", "-rEn", "--include=*.cc", "--include=*.cpp", "--include=*.h",
-             "--include=*.hpp", r"\b%s\s*\(" % re.escape(sym), src],
-            capture_output=True, text=True, timeout=30).stdout
-    except Exception:
-        return []
+    call = re.compile(r"\b%s\s*\(" % re.escape(sym))
+    hits = []
+    for root, dirs, files in os.walk(src):
+        dirs.sort()
+        for name in sorted(files):
+            if not name.endswith((".cc", ".cpp", ".h", ".hpp")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    for no, line in enumerate(fh, 1):
+                        if call.search(line):
+                            hits.append("%s:%d:%s" % (path, no, line.rstrip("\n")))
+            except OSError:
+                continue
+    out = "\n".join(hits)
     def _rel(ln):
         return (ln[len(src):].lstrip("/") if ln.startswith(src) else ln).strip()[:200]
     def _is_comment(rel):
