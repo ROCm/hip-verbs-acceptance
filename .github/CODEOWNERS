@@ -1,4 +1,4 @@
 # Code owners for the HIP/Verbs Acceptance Suite.
 # Owners are automatically requested for review on matching paths.
 
-*            @nikitaxgusev @VadimKutovoi
+*            @ROCm/hip-verbs-acceptance-maintainers
