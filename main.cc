@@ -1067,8 +1067,12 @@ int do_nodes(const Options& opt) {
     }
     if (c.timed_out) {
       std::fprintf(stderr,
-                   "error: rank %d on %s did not complete within %lds — killed "
-                   "(possible unreachable node / rendezvous hang)\n",
+                   "error: rank %d on %s did not complete within the overall "
+                   "%lds --launch-timeout for this run — killed (possible "
+                   "unreachable node / rendezvous hang; this deadline covers "
+                   "the whole ssh launch + run, not a single connection "
+                   "attempt — pass a larger --launch-timeout to allow more "
+                   "time)\n",
                    c.rank, c.node.c_str(), opt.launch_timeout);
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
