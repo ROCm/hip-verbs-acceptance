@@ -26,7 +26,7 @@ minutes.
 ```bash
 cd hip-verbs-acceptance
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-      -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON -DCMAKE_PREFIX_PATH=/opt/rocm
+      -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
 cmake --build build -j
 # produces: build/hva   and   build/unit_tests
 ```
@@ -108,7 +108,9 @@ underlying bug. The gate is green only when nothing `MUST_PASS` fails and
 no known bug is present, so `ACCEPTANCE: FAIL` above is the tracked ROCm regression,
 not a suite defect.
 
-**Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `4` launch failure
+**Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `3` I/O error
+(cannot open/write a result or report file, mkdtemp/port allocation failure),
+`4` launch failure
 (ssh/unreachable/timeout).
 
 ---
@@ -206,8 +208,9 @@ Per-platform "simplified CSV" (auto-selected as `<gpu>_<nic>.csv`, e.g.
 commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 [docs/POLICY_REFERENCE.md](docs/POLICY_REFERENCE.md).
 
-- `class` in `MUST_PASS | NA | SKIP | KNOWN_FAILURE` (unlisted => `UNCLASSIFIED`,
-  flagged, gate-neutral).
+- `class` in `MUST_PASS | NA | SKIP | KNOWN_FAILURE`. A registered test with no
+  matching row is **not run at all** (silently excluded — the policy is the
+  authoritative run list); use `--lint` to find tests missing from the policy.
 - `when` (optional) gates the row on the environment: `rocm>=7.1`, `driver<6.0`,
   `gpu<2`, `sym:hipStreamGetId`, `!sym:libionic` (`;`-join = AND).
 - `expected` (`KNOWN_FAILURE` only): the expected reduced status (default `fail`).
