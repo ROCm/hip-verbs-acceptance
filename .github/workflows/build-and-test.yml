@@ -1,0 +1,81 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Build-and-test gate: builds the harness with both compilers the project
+# supports (GCC 11.5, the compiler on Ruby CoCo compute nodes, and GCC 13,
+# the README's stated minimum) across the synthetic and full build
+# configurations, then runs the unit tests and the harness self-test. No GPU
+# or RDMA NIC is available on the runner; both configurations build with
+# -DACCEPT_WITH_HIP / -DACCEPT_WITH_IBVERBS resolving their runtime symbols
+# via dlopen, so the binary builds and `hva --list` runs without hardware.
+
+name: Build and test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.image }} / ${{ matrix.config.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - "gcc:11"
+          - "gcc:13"
+        config:
+          - name: synthetic
+            cmake_flags: -DACCEPT_WITH_HIP=OFF -DACCEPT_WITH_IBVERBS=OFF
+          - name: full
+            cmake_flags: -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cmake (>= 3.20) and python3
+        # gcc:11's apt cmake is older than 3.20 (Debian bullseye ships 3.18);
+        # a venv + pip-installed cmake wheel works unchanged on both images,
+        # so the same install method is used for every matrix leg.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 python3-venv ca-certificates
+          python3 -m venv /opt/hva-tools
+          /opt/hva-tools/bin/pip install --no-cache-dir "cmake>=3.20"
+          echo "/opt/hva-tools/bin" >> "$GITHUB_PATH"
+
+      - name: cmake --version
+        run: cmake --version
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-${{ matrix.config.name }}
+          ${{ matrix.config.cmake_flags }}
+          -DACCEPT_WERROR=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-${{ matrix.config.name }} -j
+
+      - name: Unit tests
+        run: ./build-${{ matrix.config.name }}/unit_tests
+
+      - name: hva --list
+        run: ./build-${{ matrix.config.name }}/hva --list
+
+      - name: Harness self-test
+        if: matrix.config.name == 'synthetic'
+        run: bash scripts/selftest.sh ./build-${{ matrix.config.name }}/hva .
