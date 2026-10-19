@@ -35,6 +35,10 @@ Drop `-DACCEPT_WITH_HIP=ON` / `-DACCEPT_WITH_IBVERBS=ON` to compile out the HIP 
 Verbs tests (e.g. on a box with no GPU or no NIC). With both off you still get the
 harness + [synthetic set](#harness-smoke-test-no-gpunic).
 
+To install a packaged copy, `cmake --install build --prefix <dir>` places the
+binary at `<dir>/bin/hva` and the policy CSVs at `<dir>/bin/policy/*.csv`,
+keeping the auto-policy lookup (`<binary_dir>/policy/...`) working out of the box.
+
 ### 2. Run the HIP tests (single node)
 
 ```bash

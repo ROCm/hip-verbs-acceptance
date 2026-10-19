@@ -181,6 +181,12 @@ target_compile_options(unit_tests PRIVATE ${ACCEPT_WARN_FLAGS})
 enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# install() for --nodes same-path binary assumption.
+# install() for --nodes same-path binary assumption. The policy CSVs are
+# installed next to the binary (<prefix>/bin/policy/*.csv) to match the
+# auto-policy lookup (<binary_dir>/policy/<gpu>_<nic>.csv, see
+# resolve_policy_path() in main.cc), so a packaged install works without the
+# caller also copying policy/ by hand.
 include(GNUInstallDirs)
 install(TARGETS hva RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY policy/ DESTINATION ${CMAKE_INSTALL_BINDIR}/policy
+        FILES_MATCHING PATTERN "*.csv")
