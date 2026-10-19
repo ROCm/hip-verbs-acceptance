@@ -51,14 +51,30 @@ local ranks:
       --kind func --report report.json
 ```
 
-Across two real nodes (rank 0 listens on `nodes[0]`, rank 1 is ssh-launched;
-binary + policy must be at the **same absolute path** on both, e.g. a shared FS):
+Across two real nodes (rank 0 listens on `nodes[0]`, rank 1 is launched by the
+selected `--remote-launcher`; binary + policy must be at the **same absolute
+path** on both, e.g. a shared FS):
 
 ```bash
 ./build/hva --nodes host1,host2 --filter-category 'verbs/*' \
       --kind func --report report.json
-#   [--ssh-user U] [--port P] [--remote-binary PATH] [--launch-timeout S]
+#   [--remote-launcher ssh|srun] [--port P] [--remote-binary PATH] [--launch-timeout S]
+#   ssh only: [--ssh-user U]
 ```
+
+Two launchers are available via `--remote-launcher` (default `ssh`):
+
+- **`ssh`** — the default; works anywhere passwordless ssh between the
+  allocated nodes is set up (`~/.ssh/config` or `--ssh-user`).
+- **`srun`** — use this inside a Slurm allocation where direct ssh between
+  compute nodes is blocked (a common cluster policy). It requires
+  `SLURM_JOB_ID` to be set (i.e. running from inside `sbatch`/`salloc`) and
+  does not accept `--ssh-user` (srun has no login-user concept — it runs as
+  the job's submitting user). Needs **Slurm >= 20.11** for the `--overlap`
+  flag the launcher passes so the step can share the allocation with the
+  batch/interactive step. Unlike ssh, srun propagates the launcher's
+  environment to the worker by itself — no separate env-forwarding flag is
+  needed for this path.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
@@ -105,7 +121,7 @@ no known bug is present, so `ACCEPTANCE: FAIL` above is the tracked ROCm regress
 not a suite defect.
 
 **Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `4` launch failure
-(ssh/unreachable/timeout).
+(ssh/srun/unreachable/timeout).
 
 ---
 
@@ -122,7 +138,8 @@ not a suite defect.
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
 | `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
-| `--nodes h1,h2` | ssh-launch one worker per node and reconcile |
+| `--nodes h1,h2` | launch one worker per node and reconcile |
+| `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
@@ -184,7 +201,7 @@ ACCEPTANCE: FAIL — 11 test(s) failed the gate
 The authoritative "harness behaves correctly" check asserts the full matrix:
 
 ```bash
-./build/unit_tests                                    # unit checks (reduce/classify, policy CSV, ssh builders)
+./build/unit_tests                                    # unit checks (reduce/classify, policy CSV, ssh/srun builders)
 bash scripts/selftest.sh ./build/hva .  # end-to-end checks against the synthetic oracle
 ```
 

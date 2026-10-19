@@ -151,8 +151,8 @@ versions, GPU count) is auto-detected at runtime.
 
 Two concerns are kept separate:
 
-1. **Process launch / placement** — pluggable *launcher*: `ssh` now,
-   `slurm`/`mpirun` later.
+1. **Process launch / placement** — pluggable *launcher*: `ssh` or `srun` now
+   (`--remote-launcher ssh|srun`), `mpirun` later.
 2. **Runtime out-of-band (OOB) exchange** — pluggable *bootstrap*: how ranks find
    each other and swap QP metadata at runtime.
 
@@ -177,9 +177,10 @@ least-justified component in the suite. So `SocketBootstrap` implements:
 
 `allgather` is kept in the interface (it is what the global Reporter rendezvous
 uses) but is only required to be correct for `size ≤ 2` in this iteration. True
-N-rank support is deferred to the same bucket as the slurm/mpirun launcher
-(§13). `MpiBootstrap`, when present, is naturally N-rank and can be used for
-larger runs.
+N-rank support is deferred to the same bucket as the mpirun launcher (§13); the
+`ssh`/`srun` launchers only place one process per node each — they do not, by
+themselves, make `SocketBootstrap` N-rank. `MpiBootstrap`, when present, is
+naturally N-rank and can be used for larger runs.
 
 ```cpp
 // common/Bootstrap.hpp
@@ -873,8 +874,12 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   a short timeout — **not** a mirror of the MPI `ASSERT_BOOTSTRAP_*` macro family.
   This buys the graceful-exit benefit for a fraction of the cost and without the
   size==1 no-op and §7.3 double-count footguns (see §4 non-goal, §7.3 rule 4).
-- `slurm` / `mpirun` launcher plugins (launcher/bootstrap split already admits
-  them).
+- `mpirun` launcher plugin (launcher/bootstrap split already admits it).
+  *`srun` is implemented* (`--remote-launcher srun`) — one
+  task per allocated node via `srun --nodes=1 --ntasks=1 --nodelist=<n>
+  --overlap`, for clusters where direct ssh between compute nodes is blocked.
+  Requires Slurm >= 20.11 (`--overlap`) and `SLURM_JOB_ID` set (i.e. running
+  inside an allocation).
 - `fw_version`-ranged classification entries (firmware-aware gating).
 - Performance baselines + tolerance-based regression gating (§9).
 - Multi-NIC-per-node and full heterogeneous-cluster support (current assumption:

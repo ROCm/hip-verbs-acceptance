@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: MIT
  ************************************************************************/
 
-// unit_ssh — unit tests for the ssh/CLI builders + quoting that the --nodes
-// launcher relies on (common/SshLauncher.*). Covers shell_single_quote,
+// unit_ssh — unit tests for the ssh/srun/CLI builders + quoting that the
+// --nodes launcher relies on (common/SshLauncher.*). Covers shell_single_quote,
 // build_ssh_argv, build_remote_command (incl. --policy made ABSOLUTE & quoted
-// and --filter single-quoted so a glob can't be expanded), and split_nodes.
+// and --filter single-quoted so a glob can't be expanded), build_launch_argv's
+// ssh/srun dispatch, and split_nodes.
 
 #include <algorithm>
 #include <string>
@@ -179,6 +180,57 @@ void test_build_remote_command() {
   }
 }
 
+void test_build_launch_argv() {
+  SshRank r;
+  r.rank = 1;
+  r.node = "host2";
+  r.remote_command = "the remote command --filter 'x*'";
+
+  // Ssh (default): build_launch_argv must be IDENTICAL to build_ssh_argv —
+  // no regression for the existing default launcher.
+  {
+    SshLaunchOptions o;
+    o.launcher = RemoteLauncher::Ssh;
+    o.ssh_user = "testuser";
+    o.connect_timeout = 9;
+    const std::vector<std::string> dispatched = build_launch_argv(r, o);
+    const std::vector<std::string> direct = build_ssh_argv(r, o);
+    CHECK(dispatched == direct,
+          "build_launch_argv(Ssh) == build_ssh_argv (no regression)");
+  }
+
+  // Srun: argv shape matches the plan's srun invocation.
+  {
+    SshLaunchOptions o;
+    o.launcher = RemoteLauncher::Srun;
+    const std::vector<std::string> a = build_launch_argv(r, o);
+    CHECK(!a.empty() && a[0] == "srun", "srun argv[0] == 'srun'");
+    CHECK(has_arg(a, "--nodelist=host2"), "srun argv has --nodelist=<node>");
+    CHECK(has_arg(a, "--ntasks=1"), "srun argv has --ntasks=1");
+    CHECK(has_arg(a, "--nodes=1"), "srun argv has --nodes=1");
+    CHECK(has_arg(a, "--overlap"), "srun argv has --overlap");
+    CHECK(has_arg(a, "--kill-on-bad-exit=1"),
+          "srun argv has --kill-on-bad-exit=1");
+    // Ends with /bin/sh, -c, <remote_command> as one element (same contract
+    // as ssh: the remote command is never split/re-quoted on the way out).
+    CHECK(a.size() >= 3 &&
+              a[a.size() - 3] == "/bin/sh" &&
+              a[a.size() - 2] == "-c" &&
+              a.back() == r.remote_command,
+          "srun argv ends with /bin/sh, -c, <remote_command> as one element");
+    // No ssh-only options leak into the srun argv.
+    CHECK(!has_arg(a, "-n"), "srun argv has no ssh -n");
+    CHECK(!has_arg(a, "-l"), "srun argv has no ssh -l");
+    CHECK(index_of(a, "BatchMode=yes") < 0,
+          "srun argv has no ssh BatchMode option");
+    CHECK(index_of(a, "StrictHostKeyChecking=no") < 0,
+          "srun argv has no ssh StrictHostKeyChecking option");
+    for (const auto& e : a)
+      CHECK(e.find("ConnectTimeout=") == std::string::npos,
+            "srun argv has no ssh ConnectTimeout option");
+  }
+}
+
 void test_split_nodes() {
   {
     const std::vector<std::string> v = split_nodes("a,b");
@@ -212,6 +264,7 @@ void run_ssh_tests() {
   test_shell_single_quote();
   test_build_ssh_argv();
   test_build_remote_command();
+  test_build_launch_argv();
   test_split_nodes();
 }
 
