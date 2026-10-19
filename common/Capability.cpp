@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: MIT
  ************************************************************************/
 
+// dlinfo()/RTLD_DI_LINKMAP (used by resolve_from_loaded_runtime() below) are a
+// glibc extension declared by <dlfcn.h> only under _GNU_SOURCE. Define it
+// before any system header is pulled in (including transitively).
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "common/Capability.hpp"
 
 #include <algorithm>
@@ -13,8 +20,10 @@
 #include <fstream>
 #include <initializer_list>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <dirent.h>
@@ -39,6 +48,8 @@
 // HIP toolchain). HipApi.hpp defines __HIP_PLATFORM_AMD__ and redirects the HIP
 // entry points to the run-time-loaded ops table, so no ROCm library is linked.
 #include "hip/utils/HipApi.hpp"
+// struct link_map (dlinfo(RTLD_DI_LINKMAP)) -- resolve_from_loaded_runtime().
+#include <link.h>
 #endif
 
 namespace acceptance {
@@ -73,6 +84,50 @@ std::string read_attr(const std::string& path) {
     v.pop_back();
   }
   return v;
+}
+
+// Max parent-directory hops resolve_from_loaded_runtime() will walk up from
+// the loaded libamdhip64.so's lib/ dir looking for ".info/version" (see
+// Capability.hpp field docs). A typical ROCm install keeps it one level above
+// lib/ (the stage root); the extra headroom covers deeper layouts.
+constexpr int kInfoVersionMaxLevels = 3;
+
+// Lexically walk `dir` up `levels` parent directories (0 = dir itself).
+// Purely string-based (no filesystem access, no symlink resolution) so it
+// works the same whether or not the path exists. Stops early (returns as far
+// as it got) once there is no further parent to strip, e.g. at "/" or a bare
+// relative name with no '/'.
+std::string ancestor_dir(std::string dir, int levels) {
+  for (int i = 0; i < levels; ++i) {
+    while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
+    if (dir == "/") break;  // already at the filesystem root
+    const std::size_t slash = dir.find_last_of('/');
+    if (slash == std::string::npos) break;  // relative path, no parent left
+    dir = (slash == 0) ? "/" : dir.substr(0, slash);
+  }
+  return dir;
+}
+
+// Shared primitive behind the public find_info_version(): walk from
+// `start_dir` up through at most `max_levels` parent directories looking for
+// "<dir>/.info/version". Returns (dir, first-line-content) of the first hit,
+// so callers that need the matched root (for EnvironmentInfo::rocm_path) and
+// callers that only need the version string (the unit-tested helper) share one
+// implementation.
+std::optional<std::pair<std::string, std::string>> locate_info_version(
+    const std::string& start_dir, int max_levels) {
+  if (start_dir.empty() || max_levels < 0) return std::nullopt;
+  std::string prev;
+  bool have_prev = false;
+  for (int level = 0; level <= max_levels; ++level) {
+    const std::string dir = ancestor_dir(start_dir, level);
+    const std::string content = read_first_line(dir + "/.info/version");
+    if (!content.empty()) return std::make_pair(dir, content);
+    if (have_prev && dir == prev) break;  // walked as far up as possible
+    prev = dir;
+    have_prev = true;
+  }
+  return std::nullopt;
 }
 
 // List entries of a directory (excluding "." and ".."), sorted by name.
@@ -566,12 +621,107 @@ void enrich_hip(EnvironmentInfo& env) {
 #endif
 }
 
+// --- ROCm version resolution (priority chain; see Capability.hpp field docs) -
+
+#ifdef ACCEPT_HAVE_HIP
+// Source 1 ("runtime_info"): directory of the LOADED libamdhip64.so, found via
+// dlinfo(RTLD_DI_LINKMAP) on the wrapper's dlopen handle (hip_dlopen_handle()).
+// This is the ROCm actually in use regardless of what /opt/rocm or $ROCM_PATH
+// say, which matters under CoCo's wheel stacks (LD_LIBRARY_PATH-only ROCm).
+bool resolve_from_loaded_runtime(EnvironmentInfo& env) {
+  if (!::acceptance::hipw::init_result().hip_lib_loaded) return false;
+  void* handle = ::acceptance::hipw::hip_dlopen_handle();
+  if (handle == nullptr) return false;
+  struct link_map* map = nullptr;
+  if (::dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr ||
+      map->l_name == nullptr || map->l_name[0] == '\0') {
+    return false;  // dlinfo unsupported/failed; fall through the chain
+  }
+  const std::string lib_path = map->l_name;
+  const std::size_t slash = lib_path.rfind('/');
+  if (slash == std::string::npos) return false;  // no directory component
+  const std::string lib_dir = lib_path.substr(0, slash);
+  const auto hit = locate_info_version(lib_dir, kInfoVersionMaxLevels);
+  if (!hit) return false;
+  env.rocm_path = hit->first;
+  env.rocm_version = hit->second;
+  env.rocm_version_source = "runtime_info";
+  return true;
+}
+#endif
+
+// Source 2 ("rocm_path"): $ROCM_PATH/.info/version. No ACCEPT_HAVE_HIP needed
+// -- this is a plain env var + file read.
+bool resolve_from_rocm_path_env(EnvironmentInfo& env) {
+  const char* rocm_path = std::getenv("ROCM_PATH");
+  if (rocm_path == nullptr || *rocm_path == '\0') return false;
+  const auto hit = locate_info_version(rocm_path, 0);
+  if (!hit) return false;
+  env.rocm_path = hit->first;
+  env.rocm_version = hit->second;
+  env.rocm_version_source = "rocm_path";
+  return true;
+}
+
+#ifdef ACCEPT_HAVE_HIP
+// Source 3 ("hip_runtime"): hipRuntimeGetVersion() decoded. No filesystem path
+// is known from this source, so rocm_path stays empty.
+bool resolve_from_hip_runtime(EnvironmentInfo& env) {
+  if (!::acceptance::hipw::init_result().hip_lib_loaded) return false;
+  try {
+    int hip_version = 0;
+    if (hipRuntimeGetVersion(&hip_version) != hipSuccess) return false;
+    const std::string decoded = decode_hip_version(hip_version);
+    if (decoded.empty()) return false;
+    env.rocm_path.clear();
+    env.rocm_version = decoded;
+    env.rocm_version_source = "hip_runtime";
+    return true;
+  } catch (const ::acceptance::hipw::MissingSymbol&) {
+    return false;  // runtime lacks hipRuntimeGetVersion; fall through
+  }
+}
+#endif
+
+// Source 4 ("opt_rocm"): /opt/rocm/.info/version -- the original hardcoded lookup,
+// kept as the last-resort fallback.
+bool resolve_from_opt_rocm(EnvironmentInfo& env) {
+  const auto hit = locate_info_version("/opt/rocm", 0);
+  if (!hit) return false;
+  env.rocm_path = hit->first;
+  env.rocm_version = hit->second;
+  env.rocm_version_source = "opt_rocm";
+  return true;
+}
+
+// Resolve env.rocm_version / rocm_path / rocm_version_source via the 4-source
+// priority chain documented on EnvironmentInfo::rocm_version. MUST run after
+// the HIP wrapper is initialised (acceptance::hipw::init(), called once at
+// process start in main() before any detect()/environment() call) so
+// init_result().hip_lib_loaded already reflects whether libamdhip64.so loaded;
+// called here right after enrich_hip() for the same reason.
+void resolve_rocm_version(EnvironmentInfo& env) {
+#ifdef ACCEPT_HAVE_HIP
+  if (resolve_from_loaded_runtime(env)) return;
+#endif
+  if (resolve_from_rocm_path_env(env)) return;
+#ifdef ACCEPT_HAVE_HIP
+  if (resolve_from_hip_runtime(env)) return;
+#endif
+  if (resolve_from_opt_rocm(env)) return;
+  env.rocm_version.clear();
+  env.rocm_path.clear();
+  env.rocm_version_source = "none";
+}
+
 // The deterministic fixed descriptor returned when ACCEPT_FAKE_ENV is set.
 EnvironmentInfo fake_env() {
   EnvironmentInfo env;
   env.vendor = "thor";
   env.rdma_prefix = "bnxt_re";
   env.rocm_version = "0.0-fake";
+  env.rocm_path = "/fake/rocm";
+  env.rocm_version_source = "opt_rocm";
   env.gpu_count = 8;
   env.kernel = "0.0.0-fake";
   env.os = "FakeOS 1.0";
@@ -599,6 +749,26 @@ EnvironmentInfo fake_env() {
 }
 
 }  // namespace
+
+std::string decode_hip_version(int version) {
+  if (version <= 0) return std::string();
+  // HIP_VERSION = major*10000000 + minor*100000 + patch (decimal, not hex).
+  const long major     = version / 10000000;
+  const long remainder = version % 10000000;
+  const long minor     = remainder / 100000;
+  const long patch     = remainder % 100000;
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%ld.%ld.%ld", major, minor, patch);
+  return buf;
+}
+
+std::optional<std::string> find_info_version(const std::string& start_dir,
+                                              int max_levels) {
+  if (const auto hit = locate_info_version(start_dir, max_levels)) {
+    return hit->second;
+  }
+  return std::nullopt;
+}
 
 EnvironmentInfo detect() {
   // TEST SEAM (checked FIRST): deterministic descriptor, no hardware reads.
@@ -647,9 +817,6 @@ EnvironmentInfo detect() {
     env.vendor = "unknown";
   }
 
-  // --- ROCm version (best-effort) ----------------------------------------
-  env.rocm_version = read_first_line("/opt/rocm/.info/version");
-
   // --- GPU devices + count (KFD topology, dep-free sysfs) -------------------
   env.gpu_count = detect_gpu_devices(env.gpu_devices);
 
@@ -674,6 +841,11 @@ EnvironmentInfo detect() {
   enrich_ibverbs(env);  // vendor_id/vendor_part_id (ACCEPT_HAVE_IBVERBS)
   enrich_hip(env);      // gpu_model only (ACCEPT_HAVE_HIP)
 
+  // --- ROCm version (priority chain; runs after enrich_hip so the HIP
+  // wrapper's init_result()/dlopen handle are settled -- see the function
+  // doc comment) -------------------------------------------------------
+  resolve_rocm_version(env);
+
   return env;
 }
 
@@ -687,6 +859,8 @@ std::string EnvironmentInfo::to_kv() const {
   out << "vendor=" << kv_safe(vendor) << "\n";
   out << "rdma_prefix=" << kv_safe(rdma_prefix) << "\n";
   out << "rocm_version=" << kv_safe(rocm_version) << "\n";
+  out << "rocm_path=" << kv_safe(rocm_path) << "\n";
+  out << "rocm_version_source=" << kv_safe(rocm_version_source) << "\n";
   out << "gpu_count=" << TestResult::int_to_chars(gpu_count) << "\n";
   out << "kernel=" << kv_safe(kernel) << "\n";
   out << "os=" << kv_safe(os) << "\n";
@@ -758,6 +932,8 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
     if (key == "vendor")            env.vendor = val;
     else if (key == "rdma_prefix")  env.rdma_prefix = val;
     else if (key == "rocm_version") env.rocm_version = val;
+    else if (key == "rocm_path")    env.rocm_path = val;
+    else if (key == "rocm_version_source") env.rocm_version_source = val;
     else if (key == "gpu_count")    env.gpu_count = to_int(val, 0);
     else if (key == "kernel")       env.kernel = val;
     else if (key == "os")           env.os = val;

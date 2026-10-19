@@ -165,6 +165,7 @@ add_executable(unit_tests
   tests/unit_resultio.cc
   tests/unit_ssh.cc
   tests/unit_perf.cc
+  tests/unit_capability.cc
   common/Reporter.cpp
   common/PerfSummary.cpp
   common/Policy.cpp
