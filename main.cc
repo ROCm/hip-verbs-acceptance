@@ -857,6 +857,18 @@ int do_local_ranks(const Options& opt) {
       if (!opt.vendor.empty())  { args.push_back("--vendor");  args.push_back(opt.vendor); }
       if (!opt.policy.empty())  { args.push_back("--policy");  args.push_back(opt.policy); }
       if (opt.isolate_explicit) { args.push_back("--isolate"); args.push_back(opt.isolate); }
+      // Forwarded for parity with --nodes' RemoteCommandParams (do_nodes). For
+      // --gid/--device this is belt-and-suspenders: the launcher already
+      // setenv()s ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE before spawning (see
+      // run()), and execv() below inherits that environment, so those two were
+      // already effectively forwarded; passing them as flags too keeps the
+      // --local-ranks and --nodes code paths visibly symmetric and doesn't
+      // change behavior (same value either way).
+      if (!opt.filter_class.empty())    { args.push_back("--filter-class");    args.push_back(opt.filter_class); }
+      if (!opt.filter_category.empty()) { args.push_back("--filter-category"); args.push_back(opt.filter_category); }
+      if (opt.hide_na)                  { args.push_back("--hide-na"); }
+      if (!opt.gid.empty())             { args.push_back("--gid");    args.push_back(opt.gid); }
+      if (!opt.device.empty())          { args.push_back("--device"); args.push_back(opt.device); }
       std::vector<char*> cargv;
       cargv.reserve(args.size() + 1);
       for (auto& a : args) cargv.push_back(a.data());

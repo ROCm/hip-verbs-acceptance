@@ -773,6 +773,76 @@ PYEOF
   fi
 fi
 
+# ===========================================================================
+# Check (m): --local-ranks forwards --filter-category (and --filter-class,
+# --hide-na, --gid, --device) to its spawned workers, same as --nodes already
+# does. Every registered synthetic test shares category "synthetic", so this
+# build cannot show --filter-category actually EXCLUDING a test (there is no
+# second category to exclude); what this check CAN and does prove is that the
+# flag is accepted and parsed cleanly by both execv'd workers (before this
+# change, do_local_ranks silently dropped it, so a worker never saw it and
+# could not fail on it either) and that the 2-rank reconciliation still
+# produces the exact same result as the equivalent run without the flag
+# (check (f)) -- i.e. forwarding it is not a no-op path that happens to also
+# not break anything.
+# ===========================================================================
+REP_M="$TMP/rep2_cat.json"
+LOG_M="$TMP/twonode_cat.log"
+run_bin "$LOG_M" --local-ranks 2 --filter 'syn2_*' --filter-category synthetic \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_M"
+RC_M=$RC
+
+if [ ! -f "$REP_M" ]; then
+  fail "2-rank --filter-category forwarding" "no report written: $REP_M"
+  cat "$LOG_M"
+else
+  "$PY" - "$REP_M" "$RC_M" <<'PYEOF' >"$TMP/m_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+rc = int(sys.argv[2])
+errs = []
+tests = {t["id"]: t for t in rep.get("tests", [])}
+
+def need(tid):
+    t = tests.get(tid)
+    if t is None:
+        errs.append("missing test row: %s" % tid)
+    return t
+
+t = need("syn2_barrier")
+if t is not None and t.get("status") != "pass":
+    errs.append("syn2_barrier status=%r expected pass" % t.get("status"))
+
+t = need("syn2_r0fail_r1pass")
+if t is not None:
+    if t.get("status") != "fail":
+        errs.append("syn2_r0fail_r1pass status=%r expected fail" % t.get("status"))
+    rf = t.get("reduced_from", {})
+    if rf.get("0") != "fail" or rf.get("1") != "pass":
+        errs.append("syn2_r0fail_r1pass reduced_from=%r expected {0:fail,1:pass} "
+                    "(a worker failed to parse --filter-category?)" % rf)
+
+if rc != 1:
+    errs.append("2-rank gate exit=%d expected 1 (syn2_r0fail_r1pass fails)" % rc)
+
+ranks = sorted(n.get("rank") for n in rep.get("nodes", []))
+if ranks != [0, 1]:
+    errs.append("nodes[] ranks=%r expected [0, 1] "
+                "(--filter-category reached both workers)" % ranks)
+
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--local-ranks 2 --filter-category synthetic: flag reaches both workers, reconciliation unchanged"
+  else
+    fail "2-rank --filter-category forwarding" "$(cat "$TMP/m_out.txt")"
+    cat "$LOG_M"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------
