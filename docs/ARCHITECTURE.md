@@ -618,6 +618,10 @@ selection filter narrowed the run.
 ```jsonc
 {
   "schema_version": "1.0",
+  "harness": { "version": "0.1.0-phase1", "git_sha": "9133e10-dirty" },
+                                                // build-time harness version + git SHA;
+                                                // git_sha is "unknown" for a build with
+                                                // no .git (e.g. a source tarball)
   "mode": "gate",                              // gate | discovery
   "filtered": false,                           // true when --filter*/--kind narrowed the run
   "summary": { "passed": 0, "failed": 0, "skipped": 0, "not_applicable": 0 },

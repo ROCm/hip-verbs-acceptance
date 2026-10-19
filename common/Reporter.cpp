@@ -6,6 +6,9 @@
 
 #include "common/Reporter.hpp"
 
+#include "common/Version.hpp"
+#include "common/version_info.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
@@ -553,6 +556,10 @@ int write_report(const Policy& policy, const ReportInputs& in,
   std::ostringstream doc;
   doc << "{"
       << "\n  \"schema_version\": " << jstr("1.0") << ","
+      << "\n  \"harness\": {"
+      << "\n    \"version\": " << jstr(kHarnessVersion) << ","
+      << "\n    \"git_sha\": "  << jstr(kGitSha)
+      << "\n  },"
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
       << "\n  \"summary\": {"

@@ -720,6 +720,59 @@ PYEOF
   fi
 fi
 
+# ===========================================================================
+# Check (l): --version prints a non-empty harness version and git SHA, and
+# report.json carries the same two values in a top-level "harness" object
+# (does not bump schema_version; additive field only).
+# ===========================================================================
+LOG_L="$TMP/version.log"
+run_bin "$LOG_L" --version
+RC_L=$RC
+
+if [ "$RC_L" -ne 0 ]; then
+  fail "--version exits 0" "exit=$RC_L"
+  cat "$LOG_L"
+elif ! grep -Eq '^hva [^ ]+ \(git [^)]+\)$' "$LOG_L"; then
+  fail "--version output format" "got: $(cat "$LOG_L")"
+else
+  pass "--version prints 'hva <version> (git <sha>)'"
+fi
+
+REP_L="$TMP/rep_version.json"
+LOG_L2="$TMP/version_report.log"
+run_bin "$LOG_L2" --vendor synthetic --policy "$POLICY/synthetic.csv" \
+    --filter 'syn_pass' --report "$REP_L"
+
+if [ ! -f "$REP_L" ]; then
+  fail "harness block in report.json" "no report written: $REP_L"
+  cat "$LOG_L2"
+else
+  "$PY" - "$REP_L" <<'PYEOF' >"$TMP/l_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+errs = []
+if rep.get("schema_version") != "1.0":
+    errs.append("schema_version=%r expected '1.0' (harness field must be additive)" % rep.get("schema_version"))
+harness = rep.get("harness")
+if not isinstance(harness, dict):
+    errs.append("top-level 'harness' object missing or not a dict: %r" % harness)
+else:
+    if not harness.get("version"):
+        errs.append("harness.version missing/empty: %r" % harness.get("version"))
+    if not harness.get("git_sha"):
+        errs.append("harness.git_sha missing/empty: %r" % harness.get("git_sha"))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "report.json has top-level harness.{version,git_sha}, schema_version unchanged"
+  else
+    fail "harness block in report.json" "$(cat "$TMP/l_out.txt")"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------

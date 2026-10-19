@@ -217,10 +217,13 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact. Top level: `mode`, `summary` counts, per-node `environment`,
-and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
-perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
-`perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
+The machine artifact. Top level: `schema_version`, `harness` (`{version, git_sha}`
+— the build-time harness version and git SHA, also printed by `hva --version`;
+`git_sha` is `"unknown"` when built with no `.git`, e.g. from a source tarball),
+`mode`, `summary` counts, per-node `environment`, and `tests[]` with `id,
+category, class, status, reason, ticket, reduced_from, perf, gate_fail,
+flagged, note, duration_ms`. Under `--kind perf`, each test's `perf` map
+carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
 
 ### Further docs
 

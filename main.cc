@@ -42,6 +42,8 @@
 #include "common/SshLauncher.hpp"
 #include "common/Perf.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Version.hpp"
+#include "common/version_info.hpp"
 #include "wrapper/hip/api_wrapper.hpp"
 #ifdef ACCEPT_HAVE_IBVERBS
 #include "wrapper/verbs/ibv_api_wrapper.hpp"
@@ -57,8 +59,6 @@ namespace {
 
 // waitpid_eintr / sleep_ms / monotonic_ms live in common/PosixUtil.hpp (shared).
 using namespace posix_util;
-
-constexpr const char* kVersion = "hva 0.1.0-phase1";
 
 enum class Mode { None, Help, Version, List, Exec, Run, Worker, LocalRanks, Nodes };
 
@@ -105,7 +105,7 @@ struct Options {
 
 void print_usage(std::FILE* out) {
   std::fprintf(out,
-    "hva " "0.1.0-phase1" " — HIP/Verbs acceptance harness\n"
+    "hva %s — HIP/Verbs acceptance harness\n"
     "\n"
     "Usage:\n"
     "  hva --list\n"
@@ -170,7 +170,8 @@ void print_usage(std::FILE* out) {
     "  --rank <n>            This worker's rank\n"
     "  --size <n>            Total rank count (1 or 2)\n"
     "  --rendezvous H:P      Rank-0 listener host:port for the socket bootstrap\n"
-    "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n");
+    "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n",
+    kHarnessVersion);
 }
 
 // Fetch the value for a flag that requires an argument. Advances `i`.
@@ -1111,7 +1112,7 @@ int run(const Options& opt) {
       return 0;
 
     case Mode::Version:
-      std::printf("%s\n", kVersion);
+      std::printf("hva %s (git %s)\n", kHarnessVersion, kGitSha);
       return 0;
 
     case Mode::List:
