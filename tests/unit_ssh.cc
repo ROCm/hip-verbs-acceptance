@@ -206,12 +206,143 @@ void test_split_nodes() {
   }
 }
 
+void test_build_remote_command_env_forwarding() {
+  RemoteCommandParams p;
+  p.kind = "func";
+
+  // Empty env (the default/zero value) -> command identical to before env forwarding:
+  // no "env" prefix at all.
+  {
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(cmd.rfind("'/abs/hva'", 0) == 0,
+          "empty env: command starts with the binary, no env prefix");
+    CHECK(!contains(cmd, "env '"), "empty env: no 'env ...' prefix at all");
+  }
+
+  // Two vars -> "env 'A=1' 'B=x y' " immediately precedes the binary, in the
+  // order given (do_nodes is responsible for sorting before calling in).
+  {
+    p.env = {{"A", "1"}, {"B", "x y"}};
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(cmd.rfind("env 'A=1' 'B=x y' '/abs/hva'", 0) == 0,
+          "two vars: command starts with env 'A=1' 'B=x y' '<binary>'");
+  }
+
+  // A value containing a single quote is escaped the canonical POSIX way,
+  // and a value containing an embedded newline survives literally (single
+  // quotes are the one POSIX quoting form that preserves it).
+  {
+    p.env = {{"Q", "a'b"}, {"N", "line1\nline2"}};
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(contains(cmd, "'Q=a'\\''b'"),
+          "env value with an embedded quote is escaped correctly");
+    CHECK(contains(cmd, "'N=line1\nline2'"),
+          "env value with an embedded newline is preserved literally");
+  }
+}
+
+void test_forward_env_pattern_matches() {
+  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_IB_DEVICE"),
+        "ACCEPT_* matches ACCEPT_IB_DEVICE");
+  CHECK(!forward_env_pattern_matches("ACCEPT_*", "ACCEPTX"),
+        "ACCEPT_* does not match ACCEPTX (no '_' boundary)");
+  CHECK(forward_env_pattern_matches("PATH", "PATH"),
+        "bare name matches itself exactly");
+  CHECK(!forward_env_pattern_matches("PATH", "PATH2"),
+        "bare name does not prefix-match");
+  CHECK(forward_env_pattern_matches("HSA_*", "HSA_"),
+        "prefix pattern matches the prefix itself (empty suffix)");
+}
+
+void test_is_valid_forward_env_pattern() {
+  CHECK(is_valid_forward_env_pattern("PATH"), "PATH is valid");
+  CHECK(is_valid_forward_env_pattern("_FOO"), "leading underscore is valid");
+  CHECK(is_valid_forward_env_pattern("ACCEPT_*"),
+        "identifier with trailing '*' is valid");
+  CHECK(!is_valid_forward_env_pattern("1BAD"),
+        "name starting with a digit is rejected");
+  CHECK(!is_valid_forward_env_pattern("A-B"),
+        "name containing '-' is rejected");
+  CHECK(!is_valid_forward_env_pattern("*"),
+        "bare '*' (empty prefix) is rejected");
+  CHECK(!is_valid_forward_env_pattern(""), "empty pattern is rejected");
+  CHECK(!is_valid_forward_env_pattern("A*B"),
+        "'*' only valid as the trailing character");
+}
+
+void test_select_forward_env() {
+  const std::vector<std::pair<std::string, std::string>> env = {
+      {"ZZZ", "last"},
+      {"PATH", "/bin:/usr/bin"},
+      {"HSA_OVERRIDE_GFX_VERSION", "11.0.0"},
+      {"UNRELATED", "nope"},
+  };
+
+  // Only variables that are actually set AND match a pattern are forwarded;
+  // output is sorted by name regardless of input/pattern order.
+  {
+    const auto sel = select_forward_env(env, {"PATH", "HSA_*"});
+    CHECK(sel.size() == 2, "select: PATH + HSA_* -> 2 entries");
+    CHECK(sel.size() == 2 && sel[0].first == "HSA_OVERRIDE_GFX_VERSION" &&
+              sel[1].first == "PATH",
+          "select: sorted by name (HSA_* before PATH)");
+  }
+
+  // A name that matches BOTH an explicit entry and a prefix pattern is
+  // forwarded exactly once (duplicate pattern coverage, not duplicate var).
+  {
+    const auto sel =
+        select_forward_env(env, {"HSA_OVERRIDE_GFX_VERSION", "HSA_*"});
+    CHECK(sel.size() == 1, "select: overlapping explicit+prefix -> 1 entry");
+    CHECK(sel.size() == 1 && sel[0].first == "HSA_OVERRIDE_GFX_VERSION" &&
+              sel[0].second == "11.0.0",
+          "select: de-duplicated entry keeps the right value");
+  }
+
+  // A pattern matching nothing set in the environment yields nothing (not
+  // an error at this layer -- validation happens on the pattern itself).
+  {
+    const auto sel = select_forward_env(env, {"NOT_SET_ANYWHERE"});
+    CHECK(sel.empty(), "select: pattern matching no set var -> empty");
+  }
+
+  // Empty pattern list -> nothing forwarded (mirrors --no-forward-env /
+  // --forward-env '').
+  {
+    const auto sel = select_forward_env(env, {});
+    CHECK(sel.empty(), "select: empty pattern list -> empty");
+  }
+}
+
+void test_parse_forward_env_spec() {
+  CHECK(parse_forward_env_spec("").empty(),
+        "parse_forward_env_spec(''): no entries (nothing forwarded)");
+  {
+    const auto v = parse_forward_env_spec("A,,B");
+    CHECK(v.size() == 2 && v[0] == "A" && v[1] == "B",
+          "parse_forward_env_spec: drops the empty middle entry");
+  }
+  {
+    const auto v = parse_forward_env_spec(" A_* , B ");
+    CHECK(v.size() == 2 && v[0] == "A_*" && v[1] == "B",
+          "parse_forward_env_spec: trims surrounding whitespace");
+  }
+}
+
 }  // namespace
 
 void run_ssh_tests() {
   test_shell_single_quote();
   test_build_ssh_argv();
   test_build_remote_command();
+  test_build_remote_command_env_forwarding();
+  test_forward_env_pattern_matches();
+  test_is_valid_forward_env_pattern();
+  test_select_forward_env();
+  test_parse_forward_env_spec();
   test_split_nodes();
 }
 

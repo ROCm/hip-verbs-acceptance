@@ -8,9 +8,11 @@
 
 #include "common/PosixUtil.hpp"
 
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -88,7 +90,25 @@ std::string build_remote_command(const RemoteCommandParams& p, int rank, int siz
   // run by the REMOTE shell via ssh, so an unquoted path/host/vendor containing a
   // space or shell metacharacter would break parsing or allow injection. rank and
   // size are integers we format ourselves, so they need no quoting.
-  std::string cmd = shell_single_quote(remote_binary);
+  //
+  // Forwarded environment: prefix the command with
+  // `env 'K1=V1' 'K2=V2' ... ` so the ssh child process (and anything it
+  // execs) sees these variables, instead of whatever the remote login shell
+  // sets up. Each "NAME=value" pair is single-quoted as ONE token, so a value
+  // containing spaces, quotes, or even embedded newlines survives intact
+  // (single quotes are the only POSIX quoting that preserves a literal
+  // newline). p.env is empty unless the caller (do_nodes) explicitly resolved
+  // --forward-env against the launcher's environment, so an empty list
+  // reproduces the command used before env forwarding byte-for-byte.
+  std::string cmd;
+  if (!p.env.empty()) {
+    cmd += "env";
+    for (const auto& kv : p.env) {
+      cmd += " " + shell_single_quote(kv.first + "=" + kv.second);
+    }
+    cmd += " ";
+  }
+  cmd += shell_single_quote(remote_binary);
   cmd += " --worker";
   cmd += " --rank " + std::to_string(rank);
   cmd += " --size " + std::to_string(size);
@@ -128,6 +148,57 @@ std::vector<std::string> split_nodes(const std::string& csv) {
     out.push_back(cur.substr(b, e - b + 1));
   }
   return out;
+}
+
+std::vector<std::string> parse_forward_env_spec(const std::string& csv) {
+  // Same comma-split + trim + drop-empty rules as split_nodes, so
+  // "--forward-env ''" and "--forward-env 'A,,B'" behave exactly like the
+  // equivalent --nodes spec would: zero / two entries, never an error.
+  return split_nodes(csv);
+}
+
+bool is_valid_forward_env_pattern(const std::string& pattern) {
+  if (pattern.empty()) return false;
+  std::string ident = pattern;
+  if (ident.back() == '*') ident.pop_back();
+  // Reject a bare "*" (empty prefix): forwarding "everything currently set"
+  // is not an allowed pattern -- the set stays explicit.
+  if (ident.empty()) return false;
+  const unsigned char first = static_cast<unsigned char>(ident.front());
+  if (!(std::isalpha(first) || first == '_')) return false;
+  for (const char c : ident) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (!(std::isalnum(uc) || c == '_')) return false;
+  }
+  return true;
+}
+
+bool forward_env_pattern_matches(const std::string& pattern,
+                                 const std::string& name) {
+  if (!pattern.empty() && pattern.back() == '*') {
+    const std::string prefix = pattern.substr(0, pattern.size() - 1);
+    return name.compare(0, prefix.size(), prefix) == 0;
+  }
+  return pattern == name;
+}
+
+std::vector<std::pair<std::string, std::string>> select_forward_env(
+    const std::vector<std::pair<std::string, std::string>>& environment,
+    const std::vector<std::string>& patterns) {
+  // std::map<name, value> both sorts by name and de-duplicates: a variable
+  // that matches more than one pattern (explicit name + overlapping prefix,
+  // or two overlapping prefixes) is still inserted once.
+  std::map<std::string, std::string> matched;
+  for (const auto& kv : environment) {
+    for (const auto& pat : patterns) {
+      if (forward_env_pattern_matches(pat, kv.first)) {
+        matched.emplace(kv.first, kv.second);
+        break;  // already selected; no need to test the remaining patterns
+      }
+    }
+  }
+  return std::vector<std::pair<std::string, std::string>>(matched.begin(),
+                                                           matched.end());
 }
 
 std::vector<std::string> build_ssh_argv(const SshRank& r,

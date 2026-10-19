@@ -58,7 +58,13 @@ binary + policy must be at the **same absolute path** on both, e.g. a shared FS)
 ./build/hva --nodes host1,host2 --filter-category 'verbs/*' \
       --kind func --report report.json
 #   [--ssh-user U] [--port P] [--remote-binary PATH] [--launch-timeout S]
+#   [--forward-env LIST] [--no-forward-env]
 ```
+
+Each ssh worker otherwise starts with only the remote login environment, not the
+launcher's — nodes are **not** assumed to carry the same environment by default.
+To bridge that, `--nodes` forwards a fixed set of launcher environment variables
+to every worker; see [Env forwarding](#env-forwarding-ssh-launcher-only) below.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
@@ -123,11 +129,57 @@ not a suite defect.
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
 | `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
 | `--nodes h1,h2` | ssh-launch one worker per node and reconcile |
+| `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
 
 Full list: `./build/hva --help`.
+
+---
+
+## Env forwarding (ssh launcher only)
+
+ssh workers do not automatically share the launcher's environment — `--nodes`
+ssh-launches each worker with its **remote login environment**, which can carry
+a different (or no) ROCm. To make the common case ("test the ROCm I have
+`LD_LIBRARY_PATH`/`ROCM_PATH` pointed at, not whatever is on the node image")
+work out of the box, `--nodes` **forwards a fixed list of variables from the
+launcher's own environment by default**:
+
+```
+LD_LIBRARY_PATH, ROCM_PATH, PATH, HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES,
+HSA_* (prefix match), ACCEPT_* (prefix match)
+```
+
+**This is a behaviour change**: before this flag existed, ssh workers always ran
+with the remote login environment only. Forwarding is now **ON by default** —
+pass `--no-forward-env` to get the old behaviour back. Only variables actually
+set in the launcher's own environment are forwarded; the default list forwards
+nothing it doesn't find set.
+
+- `--forward-env LIST` replaces the default list with a comma-separated one of
+  your own (e.g. `--forward-env 'ROCM_PATH,MY_VAR,ACCEPT_*'`); a trailing `*`
+  is a prefix match. `--forward-env ''` forwards nothing (same effect as
+  `--no-forward-env`, spelled as an explicit empty list). `--forward-env` and
+  `--no-forward-env` together are a usage error (exit 2) — they express
+  opposite intents.
+- A variable name must match `[A-Za-z_][A-Za-z0-9_]*`, optionally followed by
+  one trailing `*`; anything else is a usage error (exit 2). A bare `*` is
+  rejected (forwarding "everything" is not an allowed pattern).
+- A variable name matching more than one entry (e.g. an explicit `HSA_FOO` and
+  the `HSA_*` prefix) is still forwarded exactly once.
+- **`PATH` and `--remote-binary`:** the default `--remote-binary` is this
+  binary's own resolved `/proc/self/exe` path (always absolute), so forwarding
+  `PATH` has no effect on finding it. If you instead pass `--remote-binary` as
+  a **bare name** (no `/`) relying on a remote `$PATH` lookup, forwarding
+  `PATH` changes which `$PATH` that lookup uses — the launcher's, not the
+  node's login shell's. Prefer an absolute `--remote-binary` to avoid that
+  dependency entirely.
+- Applies to the ssh launcher only. (A future `srun` launcher propagates the
+  caller's environment itself and must not also apply this forwarding —
+  double-applying would be redundant, not harmful, but whichever of the two
+  features lands second must gate this on "launcher is ssh".)
 
 ---
 

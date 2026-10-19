@@ -25,6 +25,7 @@
 // 0.0.0.0), rank 1 on nodes[1] (dials nodes[0]:port).
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace acceptance {
@@ -86,6 +87,12 @@ struct RemoteCommandParams {
   bool        isolate_explicit = false;
   std::string gid;               // --gid index override (ssh workers don't inherit the launcher env)
   std::string device;            // --device name override (ssh workers don't inherit the launcher env)
+  // Launcher environment variables to forward to the remote worker
+  // (--forward-env), already resolved to concrete name/value pairs and sorted
+  // by name for deterministic output. Empty => no `env ...` prefix is added
+  // (identical command to before env forwarding). Applies to the ssh launcher only —
+  // srun propagates the caller's environment by itself.
+  std::vector<std::pair<std::string, std::string>> env;
 };
 
 // Build the remote WORKER command for one rank as ONE shell string. Glob-bearing
@@ -102,5 +109,40 @@ std::string build_remote_command(const RemoteCommandParams& p, int rank, int siz
 // Split a comma-separated node list, trimming surrounding whitespace and dropping
 // empty entries ("a, b," -> ["a","b"]; a single host is fine).
 std::vector<std::string> split_nodes(const std::string& csv);
+
+// --- --forward-env --------------------------------------------------
+//
+// --forward-env LIST is a comma-separated list of environment variable names
+// forwarded from the launcher to the ssh worker. A trailing '*' turns an
+// entry into a prefix match (e.g. "ACCEPT_*" matches "ACCEPT_IB_DEVICE" but
+// not "ACCEPTX"). Only variables actually set in the launcher's own
+// environment are ever forwarded.
+
+// Split a comma-separated --forward-env spec, trimming whitespace and
+// dropping empty entries (same trimming rules as split_nodes; "" -> no
+// entries, i.e. nothing is forwarded).
+std::vector<std::string> parse_forward_env_spec(const std::string& csv);
+
+// True if `pattern` is syntactically valid: an identifier
+// ([A-Za-z_][A-Za-z0-9_]*), optionally followed by one trailing '*' for a
+// prefix match. A bare "*" (empty prefix) is rejected -- forwarding
+// "everything" is not an allowed pattern, keeping the set explicit.
+bool is_valid_forward_env_pattern(const std::string& pattern);
+
+// True if `name` matches `pattern`: exact match for a bare identifier, or a
+// prefix match when `pattern` ends in '*' (the '*' is not itself a regex
+// wildcard -- it only ever means "ends the literal prefix here").
+bool forward_env_pattern_matches(const std::string& pattern,
+                                 const std::string& name);
+
+// Resolve `patterns` against `environment` (e.g. the launcher's own
+// environ, as name/value pairs): keep every variable whose name matches at
+// least one pattern. A variable matching more than one pattern (e.g. an
+// explicit "FOO" entry and a "FOO_*"-style prefix, or two overlapping
+// prefixes) is included exactly once. The result is sorted by name for a
+// deterministic remote command.
+std::vector<std::pair<std::string, std::string>> select_forward_env(
+    const std::vector<std::pair<std::string, std::string>>& environment,
+    const std::vector<std::string>& patterns);
 
 }  // namespace acceptance
