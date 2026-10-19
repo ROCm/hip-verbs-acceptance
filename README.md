@@ -60,6 +60,15 @@ binary + policy must be at the **same absolute path** on both, e.g. a shared FS)
 #   [--ssh-user U] [--port P] [--remote-binary PATH] [--launch-timeout S]
 ```
 
+If the launcher gives up (`--launch-timeout` elapses, or the launcher process
+itself dies), every worker it spawned self-destructs on its own
+`--deadline-sec` (`launch-timeout + 10`, set automatically -- not a flag you
+pass) rather than being left running and holding GPU memory / QPs for the
+next job on that node. This only applies to workers started BY the launcher;
+running `--worker` by hand (no launcher involved) is unaffected. An older
+`--remote-binary` built before this existed does not understand
+`--deadline-sec` and exits 2 -- rebuild it from this branch or later.
+
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
 `verbs/hip_mixed` subset (GPU memory registration / GDR paths) is a good local
@@ -123,6 +132,7 @@ not a suite defect.
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
 | `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
 | `--nodes h1,h2` | ssh-launch one worker per node and reconcile |
+| `--deadline-sec <s>` | worker-only; set automatically by the launcher (not a flag you pass by hand) so the worker self-destructs if the launcher gives up |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |

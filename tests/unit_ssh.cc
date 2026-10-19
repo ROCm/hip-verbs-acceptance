@@ -176,6 +176,23 @@ void test_build_remote_command() {
           "remote cmd omits --hide-na when false");
     CHECK(!contains(c2, "--policy"),
           "remote cmd omits --policy when empty");
+    // deadline_sec defaults to 0 (struct default): the flag must be entirely
+    // absent, not emitted as "--deadline-sec 0" -- keeps the command
+    // byte-identical to before --deadline-sec existed for any caller that
+    // never sets the field (backward-compatibility requirement).
+    CHECK(!contains(c2, "--deadline-sec"),
+          "remote cmd omits --deadline-sec when 0 (default)");
+  }
+
+  // --deadline-sec is forwarded when the launcher sets it (> 0).
+  {
+    RemoteCommandParams q;
+    q.kind = "func";
+    q.deadline_sec = 130;
+    const std::string c3 = build_remote_command(q, 0, 2, "/abs/hva",
+                                                 "n0:1", "synthetic");
+    CHECK(contains(c3, "--deadline-sec 130"),
+          "remote cmd forwards --deadline-sec <launch_timeout+10>");
   }
 }
 

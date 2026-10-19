@@ -351,7 +351,11 @@ fi
 # ===========================================================================
 REP_F="$TMP/rep2.json"
 LOG_F="$TMP/twonode.log"
-run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_*' --vendor synthetic \
+# 'syn2_[!h]*' excludes syn2_hang: that test is ACCEPT_SYN_HANG-gated (check
+# (l) below exercises it on its own, with the env var set) and would
+# otherwise show up here as an unrelated MUST_PASS/skip gate-fail row since
+# ACCEPT_SYN_HANG is not set in this invocation.
+run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_[!h]*' --vendor synthetic \
         --policy "$POLICY/synthetic.csv" --report "$REP_F"
 RC_F=$RC
 
@@ -717,6 +721,70 @@ PYEOF
       fail "when-predicate (fake env)" "$(cat "$TMP/k_out.txt")"
       cat "$LOG_K"
     fi
+  fi
+fi
+
+# ===========================================================================
+# Check (l): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
+# makes both --local-ranks workers spin forever in-process (a TwoNode test
+# has no per-test timeout, see Runner::run_in_process). --launch-timeout 3
+# gives each worker --deadline-sec 13 (launch_timeout+10); its own watchdog
+# thread must SIGKILL the worker's process group well before the launcher's
+# own 90s overall-wait bound, so the launcher observes an abnormal child exit
+# and returns 4. Bounded with `timeout` so a regression here fails the check
+# instead of hanging the whole selftest; the pgrep below is scoped to THIS
+# worktree's binary path (not a bare 'hva --worker') because other agents run
+# their own hva builds concurrently on this host.
+# ===========================================================================
+LOG_L="$TMP/hang.log"
+timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang \
+    --launch-timeout 3 --vendor synthetic --policy "$POLICY/synthetic.csv" \
+    >"$LOG_L" 2>&1
+RC_L=$?
+
+# Scoped stray-process check. do_local_ranks execv's "/proc/self/exe" with
+# that LITERAL string as argv[0] (so the worker's cmdline does NOT contain
+# $BIN's path -- `pgrep -f "$BIN --worker"` would never match). Instead:
+# shortlist candidates with a plain '--worker' cmdline match, then keep only
+# the ones whose /proc/<pid>/exe resolves to THIS worktree's built binary.
+# That is the scoping this host actually needs: other agents build and run
+# their OWN hva binaries concurrently (different real path => filtered out),
+# so this never mistakes their workers for a leak from this run.
+BIN_REAL="$(readlink -f "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+stray_workers() {
+  local pid exe_real out=""
+  for pid in $(pgrep -f -- '--worker' 2>/dev/null); do
+    exe_real="$(readlink -f "/proc/$pid/exe" 2>/dev/null)" || continue
+    [ "$exe_real" = "$BIN_REAL" ] && out="$out $pid"
+  done
+  printf '%s\n' "$out" | xargs -n1 2>/dev/null
+}
+
+if [ "$RC_L" -eq 124 ]; then
+  fail "worker deadline watchdog" \
+       "run HUNG (timeout tripped at 30s); watchdog did not fire"
+  cat "$LOG_L"
+  # Best-effort: do not leave the hang running for the rest of the suite.
+  STRAY="$(stray_workers)"
+  [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
+elif [ "$RC_L" -ne 4 ]; then
+  fail "worker deadline watchdog" "exit=$RC_L expected 4 (abnormal worker exit)"
+  cat "$LOG_L"
+  STRAY="$(stray_workers)"
+  [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
+else
+  # Give init a moment to reap the SIGKILL'd workers before the stray check.
+  STRAY=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    STRAY="$(stray_workers)"
+    [ -z "$STRAY" ] && break
+    sleep 0.3
+  done
+  if [ -z "$STRAY" ]; then
+    pass "worker deadline watchdog (exit 4, no stray hva --worker processes)"
+  else
+    fail "worker deadline watchdog" "stray worker process(es) remain: $STRAY"
+    kill -9 $STRAY 2>/dev/null
   fi
 fi
 

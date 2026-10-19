@@ -86,6 +86,9 @@ struct RemoteCommandParams {
   bool        isolate_explicit = false;
   std::string gid;               // --gid index override (ssh workers don't inherit the launcher env)
   std::string device;            // --device name override (ssh workers don't inherit the launcher env)
+  long        deadline_sec = 0;  // --deadline-sec N (worker self-destruct deadline); 0 => omit the
+                                  // flag entirely, so an older --remote-binary that predates
+                                  // --deadline-sec is not handed a flag it would reject.
 };
 
 // Build the remote WORKER command for one rank as ONE shell string. Glob-bearing

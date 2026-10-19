@@ -113,6 +113,11 @@ std::string build_remote_command(const RemoteCommandParams& p, int rank, int siz
   if (p.isolate_explicit)         cmd += " --isolate "         + shell_single_quote(p.isolate);
   if (!p.gid.empty())             cmd += " --gid "             + shell_single_quote(p.gid);
   if (!p.device.empty())          cmd += " --device "          + shell_single_quote(p.device);
+  // Worker self-destruct deadline: armed only when > 0, so a 0 (the
+  // struct default) omits the flag — keeps the command byte-identical to
+  // before this feature existed when the caller never sets it.
+  if (p.deadline_sec > 0)
+    cmd += " --deadline-sec " + std::to_string(p.deadline_sec);
   return cmd;
 }
 
