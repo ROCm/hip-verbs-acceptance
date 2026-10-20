@@ -723,7 +723,10 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
 // locks). A thread has none of those constraints, so the deadline check and
 // the diagnostic print are ordinary code.
 void arm_worker_deadline(long deadline_sec) {
-  if (::setpgid(0, 0) != 0) {
+  // Under ssh the worker is already its own session (and so process-group)
+  // leader; setpgid() on a session leader always fails with EPERM, and the
+  // group is already correctly scoped, so only call it when needed.
+  if (::getpgrp() != ::getpid() && ::setpgid(0, 0) != 0) {
     std::fprintf(stderr,
                  "warning: setpgid(0,0) failed: %s (deadline watchdog still "
                  "armed; kill(-getpgrp()) may reach a wider group than "
