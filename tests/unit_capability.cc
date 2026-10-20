@@ -18,6 +18,8 @@
 #include <optional>
 #include <string>
 
+#include <sys/stat.h>  // mkfifo
+
 #include "common/Capability.hpp"
 #include "tests/unit_harness.hpp"
 
@@ -102,6 +104,27 @@ void test_find_info_version() {
         "find_info_version: empty start_dir -> nullopt");
   CHECK(!find_info_version(case1_lib.string(), -1).has_value(),
         "find_info_version: negative max_levels -> nullopt");
+
+  // Case 6: content that is not a version string is ignored, so arbitrary
+  // file content never reaches the report.
+  const std::filesystem::path case6 = root / "case6";
+  write_file(case6 / ".info" / "version", "not a version\n");
+  CHECK(!find_info_version(case6.string(), 0).has_value(),
+        "find_info_version: non-version content -> nullopt");
+
+  // Case 7: a FIFO in place of the file is skipped without blocking.
+  const std::filesystem::path case7 = root / "case7";
+  std::filesystem::create_directories(case7 / ".info");
+  CHECK(::mkfifo((case7 / ".info" / "version").c_str(), 0600) == 0,
+        "find_info_version: mkfifo scratch FIFO");
+  CHECK(!find_info_version(case7.string(), 0).has_value(),
+        "find_info_version: FIFO -> nullopt, no hang");
+
+  // Case 8: a directory in place of the file is skipped.
+  const std::filesystem::path case8 = root / "case8";
+  std::filesystem::create_directories(case8 / ".info" / "version");
+  CHECK(!find_info_version(case8.string(), 0).has_value(),
+        "find_info_version: directory -> nullopt");
 
   // Cleanup: remove the whole scratch tree so the test leaves nothing behind.
   std::error_code rm_ec;

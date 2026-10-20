@@ -28,6 +28,8 @@
 
 #include <dirent.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>   // readlink
 
@@ -92,6 +94,44 @@ std::string read_attr(const std::string& path) {
 // lib/ (the stage root); the extra headroom covers deeper layouts.
 constexpr int kInfoVersionMaxLevels = 3;
 
+// Upper bound on a ".info/version" read; real files are one short line.
+constexpr std::size_t kInfoVersionMaxBytes = 128;
+
+// A version string is non-empty and uses only [A-Za-z0-9._+~-], which covers
+// every ROCm form seen so far ("7.0.2.2", "6.4.2-120", "10.2.0a20261019").
+bool is_version_string(const std::string& s) {
+  if (s.empty()) return false;
+  for (const char c : s) {
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') || c == '.' || c == '_' ||
+                    c == '+' || c == '~' || c == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+// Read "<dir>/.info/version". `dir` can come from $ROCM_PATH, so the read is
+// defensive: the file must be a regular file (O_NONBLOCK keeps a FIFO from
+// blocking the open; fstat then rejects it), at most kInfoVersionMaxBytes are
+// read, and the first line is returned only if it is a version string. That
+// keeps arbitrary file content out of the worker kv block and report.json.
+std::string read_info_version(const std::string& dir) {
+  const std::string path = dir + "/.info/version";
+  const int fd =
+      ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOCTTY | O_NONBLOCK);
+  if (fd < 0) return std::string();
+  std::string content;
+  struct stat st {};
+  if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+    char buf[kInfoVersionMaxBytes];
+    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    if (n > 0) content.assign(buf, static_cast<std::size_t>(n));
+  }
+  ::close(fd);
+  content = content.substr(0, content.find_first_of("\r\n"));
+  return is_version_string(content) ? content : std::string();
+}
+
 // Lexically walk `dir` up `levels` parent directories (0 = dir itself).
 // Purely string-based (no filesystem access, no symlink resolution) so it
 // works the same whether or not the path exists. Stops early (returns as far
@@ -121,7 +161,7 @@ std::optional<std::pair<std::string, std::string>> locate_info_version(
   bool have_prev = false;
   for (int level = 0; level <= max_levels; ++level) {
     const std::string dir = ancestor_dir(start_dir, level);
-    const std::string content = read_first_line(dir + "/.info/version");
+    const std::string content = read_info_version(dir);
     if (!content.empty()) return std::make_pair(dir, content);
     if (have_prev && dir == prev) break;  // walked as far up as possible
     prev = dir;
@@ -651,10 +691,11 @@ bool resolve_from_loaded_runtime(EnvironmentInfo& env) {
 #endif
 
 // Source 2 ("rocm_path"): $ROCM_PATH/.info/version. No ACCEPT_HAVE_HIP needed
-// -- this is a plain env var + file read.
+// -- this is a plain env var + file read. Only absolute paths are used, so the
+// result never depends on the worker's working directory.
 bool resolve_from_rocm_path_env(EnvironmentInfo& env) {
   const char* rocm_path = std::getenv("ROCM_PATH");
-  if (rocm_path == nullptr || *rocm_path == '\0') return false;
+  if (rocm_path == nullptr || rocm_path[0] != '/') return false;
   const auto hit = locate_info_version(rocm_path, 0);
   if (!hit) return false;
   env.rocm_path = hit->first;

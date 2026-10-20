@@ -76,7 +76,7 @@ struct EnvironmentInfo {
   // to sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
   //   1. "runtime_info"  — directory of the LOADED libamdhip64.so (dlinfo on
   //                        the wrapper's handle), walked up for .info/version.
-  //   2. "rocm_path"     — $ROCM_PATH/.info/version.
+  //   2. "rocm_path"     — $ROCM_PATH/.info/version (absolute $ROCM_PATH only).
   //   3. "hip_runtime"   — hipRuntimeGetVersion() decoded (no path known).
   //   4. "opt_rocm"      — /opt/rocm/.info/version (today's behaviour).
   //   (none found -> rocm_version empty, rocm_version_source == "none")
@@ -125,8 +125,9 @@ std::string decode_hip_version(int version);
 // Walk from `start_dir` up through at most `max_levels` parent directories
 // (start_dir itself is level 0) looking for "<dir>/.info/version". Returns the
 // first line of the first one found (trailing CR/LF stripped), or
-// std::nullopt if none exists within the search depth. Pure filesystem read
-// (ifstream + string ops only) -- unit-testable without HIP or dlopen.
+// std::nullopt if none exists within the search depth. Only a regular file
+// whose first line is a version string ([A-Za-z0-9._+~-]) counts as found.
+// Pure filesystem read -- unit-testable without HIP or dlopen.
 std::optional<std::string> find_info_version(const std::string& start_dir,
                                               int max_levels);
 
