@@ -1,13 +1,13 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 #
-# Build-and-test gate: builds the harness with GCC 11 (the README's stated
-# minimum and the compiler family on Ruby CoCo compute nodes) and GCC 13,
-# across the synthetic and full build configurations, then runs the unit
-# tests and the harness self-test. No GPU or RDMA NIC is available on the
-# runner; both configurations build with -DACCEPT_WITH_HIP /
-# -DACCEPT_WITH_IBVERBS resolving their runtime symbols via dlopen, so the
-# binary builds and `hva --list` runs without hardware.
+# Build-and-test gate: builds the harness with GCC 11.5 (the README's stated
+# minimum and the compiler on Ruby CoCo compute nodes) and GCC 13.3, across
+# the synthetic and full build configurations, then runs the unit tests and
+# the harness self-test. No GPU or RDMA NIC is available on the runner; both
+# configurations build with -DACCEPT_WITH_HIP / -DACCEPT_WITH_IBVERBS
+# resolving their runtime symbols via dlopen, so the binary builds and
+# `hva --list` runs without hardware.
 
 name: Build and test
 
@@ -26,10 +26,14 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: ${{ matrix.toolchain.name }} / ${{ matrix.config.name }}
+    name: gcc-${{ matrix.toolchain.version }} / ${{ matrix.config.name }}
     runs-on: ubuntu-latest
+    # A job normally takes a few minutes; fail fast if the self-test hangs.
+    timeout-minutes: 20
     container:
-      image: ${{ matrix.toolchain.image }}
+      # Pinned by digest so a base-image refresh cannot change the toolchain
+      # under an unchanged tag.
+      image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
       # The self-test SIGKILLs a test's grandchild and then checks that its pid
       # is gone. Without an init process as PID 1, nothing reaps the orphaned
       # zombie and `kill -0` still succeeds on it.
@@ -37,12 +41,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each image's default g++ is the version named; both ship cmake >= 3.20.
+        # `version` is checked against the installed compiler, so an archive
+        # update that changes it fails the job instead of passing silently.
         toolchain:
-          - name: gcc-11
-            image: "ubuntu:22.04"
-          - name: gcc-13
-            image: "ubuntu:24.04"
+          - package: g++-11
+            version: 11.5.0
+          - package: g++-13
+            version: 13.3.0
         config:
           - name: synthetic
             cmake_flags: -DACCEPT_WITH_HIP=OFF -DACCEPT_WITH_IBVERBS=OFF
@@ -59,12 +64,18 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            g++ make cmake python3 procps
+            ${{ matrix.toolchain.package }} make cmake python3 procps
+          echo "CXX=${{ matrix.toolchain.package }}" >> "$GITHUB_ENV"
 
-      - name: Toolchain versions
+      - name: Check the compiler version
         run: |
-          g++ --version
+          "$CXX" --version
           cmake --version
+          actual="$("$CXX" -dumpfullversion)"
+          if [ "$actual" != "${{ matrix.toolchain.version }}" ]; then
+            echo "::error::expected g++ ${{ matrix.toolchain.version }}, got $actual; update the matrix"
+            exit 1
+          fi
 
       - name: Configure
         run: >
@@ -72,10 +83,16 @@ jobs:
           ${{ matrix.config.cmake_flags }}
           -DACCEPT_WERROR=ON -DCMAKE_BUILD_TYPE=Release
 
+      # unit_tests never sees ACCEPT_WITH_HIP / ACCEPT_WITH_IBVERBS, so it is
+      # the same binary in both configurations; build and run it only in the
+      # synthetic one.
       - name: Build
-        run: cmake --build build-${{ matrix.config.name }} -j
+        run: >
+          cmake --build build-${{ matrix.config.name }} -j
+          ${{ matrix.config.name == 'full' && '--target hva' || '' }}
 
       - name: Unit tests
+        if: matrix.config.name == 'synthetic'
         run: ./build-${{ matrix.config.name }}/unit_tests
 
       - name: hva --list
