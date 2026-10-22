@@ -75,7 +75,8 @@ struct EnvironmentInfo {
   // the ROCm that hva's HIP dlopen wrapper loaded rather than whatever happens
   // to sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
   //   1. "runtime_info"  — directory of the LOADED libamdhip64.so (dlinfo on
-  //                        the wrapper's handle), walked up for .info/version.
+  //                        the wrapper's handle): .info/version in its lib/
+  //                        dir or that dir's parent.
   //   2. "rocm_path"     — $ROCM_PATH/.info/version (absolute $ROCM_PATH only).
   //   3. "hip_runtime"   — hipRuntimeGetVersion() decoded (no path known).
   //   4. "opt_rocm"      — /opt/rocm/.info/version (today's behaviour).

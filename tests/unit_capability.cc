@@ -71,8 +71,9 @@ void test_find_info_version() {
   CHECK(hit1.has_value() && *hit1 == "6.4.2-120",
         "find_info_version: level 1 finds the parent's .info/version");
 
-  // Case 2: deeper nesting, right at the documented 3-level search depth
-  // (lib -> z -> y -> x, i.e. 3 parent hops from lib to the hit).
+  // Case 2: the helper honours max_levels for deeper layouts too
+  // (lib -> z -> y -> x, i.e. 3 parent hops from lib to the hit). The runtime
+  // lookup itself only goes 1 level up.
   const std::filesystem::path case2_hit_dir = root / "case2" / "x";
   const std::filesystem::path case2_lib = case2_hit_dir / "y" / "z" / "lib";
   write_file(case2_hit_dir / ".info" / "version", "10.2.0a20261013\n");

@@ -90,9 +90,11 @@ std::string read_attr(const std::string& path) {
 
 // Max parent-directory hops resolve_from_loaded_runtime() will walk up from
 // the loaded libamdhip64.so's lib/ dir looking for ".info/version" (see
-// Capability.hpp field docs). A typical ROCm install keeps it one level above
-// lib/ (the stage root); the extra headroom covers deeper layouts.
-constexpr int kInfoVersionMaxLevels = 3;
+// Capability.hpp field docs). Every known layout keeps it one level above lib/
+// (/opt/rocm-X/lib, a wheel's _rocm_sdk_core/lib). Going higher only reaches
+// shared ancestors such as /opt or site-packages, where a hit would belong to
+// something else; a miss falls through to $ROCM_PATH and the later sources.
+constexpr int kInfoVersionMaxLevels = 1;
 
 // Upper bound on a ".info/version" read; real files are one short line.
 constexpr std::size_t kInfoVersionMaxBytes = 128;
