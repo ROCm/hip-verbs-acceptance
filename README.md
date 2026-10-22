@@ -14,7 +14,7 @@ up on a platform for the first time (e.g. MI450)? Read
 
 ## Quickstart (real hardware)
 
-Prereqs: a C++20 compiler (g++ 13+) and CMake >= 3.20. A ROCm install
+Prereqs: a C++20 compiler (g++ 11+) and CMake >= 3.20. A ROCm install
 (`/opt/rocm`) is required only for the HIP tests (`-DACCEPT_WITH_HIP=ON`) and an
 RDMA NIC only for the Verbs tests (`-DACCEPT_WITH_IBVERBS=ON`) — with both flags
 off the harness still builds and runs the [synthetic set](#harness-smoke-test-no-gpunic)
