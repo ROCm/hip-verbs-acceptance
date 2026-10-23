@@ -54,10 +54,16 @@ or the behavior becomes permanent (reclassify to `NA`).
 
 Gates the row on the runtime environment. Multiple terms join with `;` (AND). If
 `when` does not match, the next row for that test id (by declaration order) is
-tried; if no row's `when` matches but at least one row exists for the test id,
-the first such row's class/ticket/reason apply as a fallback (`when_matched`
-is left unset). Only a test id with **no row at all** (no exact match, no
-matching glob) is unlisted and not run (see above).
+tried. If no row's `when` matches but at least one row exists for the test id,
+the test is **not run**. Its class is synthesized from the first row's `when`,
+not copied from that row's class: `SKIP` when every term of that predicate is
+software-gated (`rocm`, `driver`, `fw`, `sym:`, `!sym:`), and `NA` otherwise
+(e.g. a `gpu` term). The first row's ticket and reason are kept; an empty
+reason becomes "no predicate matched (environment does not satisfy any when
+clause)". `when_matched` is left unset. So `test_x,MUST_PASS,rocm>=7.1,,,` on a
+ROCm 7.0 host reports `skip`, not a `MUST_PASS` failure. Add a catch-all row
+(empty `when`) to choose the class explicitly. Only a test id with **no row at
+all** (no exact match, no matching glob) is unlisted and not run (see above).
 
 | term | true when |
 |---|---|
