@@ -279,26 +279,14 @@ std::string kfd_prop(const std::string& props, const std::string& key) {
   return std::string();
 }
 
-// Resolve a KFD topology node's PCIe BDF from its `location_id` property.
-// location_id is a hex-encoded BDF: upper 16 bits = domain, bits 8-15 = bus,
-// bits 3-7 = device, bits 0-2 = function. Format: DDDD:BB:dd.f
-// Fallback: read the "device" symlink target's last component (older kernels).
+// Resolve a KFD topology node's PCIe BDF from its `location_id` and `domain`
+// properties (see kfd_location_bdf). Fallback: read the "device" symlink
+// target's last component.
 std::string kfd_node_bdf(const std::string& node_path,
                          const std::string& props) {
-  const std::string loc_str = kfd_prop(props, "location_id");
-  if (!loc_str.empty()) {
-    try {
-      const unsigned long loc = std::stoul(loc_str, nullptr, 16);
-      const unsigned domain = (loc >> 16) & 0xFFFF;
-      const unsigned bus    = (loc >>  8) & 0xFF;
-      const unsigned dev    = (loc >>  3) & 0x1F;
-      const unsigned func   = (loc >>  0) & 0x07;
-      char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04x:%02x:%02x.%x",
-                    domain, bus, dev, func);
-      return buf;
-    } catch (...) {}
-  }
+  const std::string bdf = kfd_location_bdf(kfd_prop(props, "location_id"),
+                                           kfd_prop(props, "domain"));
+  if (!bdf.empty()) return bdf;
   // Fallback: readlink .../device -> .../pci/devices/<bdf>
   char buf[512];
   const std::string link = node_path + "/device";
@@ -377,58 +365,50 @@ int detect_gpu_devices(std::vector<GpuDevice>& out) {
   return static_cast<int>(nodes.size());
 }
 
-// Compute GPU↔NIC affinity: for each GPU, find the RDMA device whose PCIe BDF
-// shares the longest prefix with the GPU's BDF (same PCIe root → lowest hop
-// count). BDFs are "domain:bus:dev.func"; we compare the "domain:bus" prefix so
-// devices on the same bus score highest. Falls back to bnxt_re0/mlx5_0/etc.
+// The resolved sysfs device path of `link` ("" when it does not resolve).
+std::string sysfs_realpath(const std::string& link) {
+  char* p = ::realpath(link.c_str(), nullptr);
+  if (p == nullptr) return std::string();
+  const std::string out(p);
+  std::free(p);
+  return out;
+}
+
+// Compute GPU↔NIC affinity: for each GPU, the RDMA device whose sysfs PCIe
+// path shares the deepest ancestor with the GPU's (same switch beats same root
+// port beats same root complex). BDF numbering says nothing about topology, so
+// the paths are what get compared.
 std::vector<GpuNicAffinity> compute_affinity(
     const std::vector<GpuDevice>& gpus,
     const std::vector<RdmaDevice>& nics) {
   if (gpus.empty() || nics.empty()) return {};
 
-  // Build NIC BDF table: read /sys/class/infiniband/<dev>/device -> BDF.
-  auto nic_bdf = [](const std::string& dev) -> std::string {
-    char buf[512];
-    const std::string link =
-        "/sys/class/infiniband/" + dev + "/device";
-    const ssize_t n = ::readlink(link.c_str(), buf, sizeof(buf) - 1);
-    if (n <= 0) return std::string();
-    buf[n] = '\0';
-    const std::string t(buf);
-    const std::size_t s = t.rfind('/');
-    return (s == std::string::npos) ? t : t.substr(s + 1);
-  };
-
-  struct NicEntry { std::string dev; std::string bdf; };
+  struct NicEntry { std::string dev; std::string path; };
   std::vector<NicEntry> nic_entries;
   for (const auto& nic : nics) {
-    nic_entries.push_back({nic.device, nic_bdf(nic.device)});
+    nic_entries.push_back(
+        {nic.device, sysfs_realpath("/sys/class/infiniband/" + nic.device + "/device")});
   }
-
-  // Common-prefix length of two BDF strings (domain:bus share = high affinity).
-  auto common_prefix = [](const std::string& a, const std::string& b) -> std::size_t {
-    std::size_t n = std::min(a.size(), b.size()), i = 0;
-    while (i < n && a[i] == b[i]) ++i;
-    return i;
-  };
 
   std::vector<GpuNicAffinity> result;
   for (const auto& gpu : gpus) {
     GpuNicAffinity aff;
     aff.gpu_ordinal = gpu.ordinal;
-    std::size_t best = 0;
+    const std::string gpu_path =
+        gpu.bdf.empty() ? std::string() : sysfs_realpath("/sys/bus/pci/devices/" + gpu.bdf);
+    int best = 0;
     for (const auto& ne : nic_entries) {
-      const std::size_t score = common_prefix(gpu.bdf, ne.bdf);
+      const int score = pci_path_shared_depth(gpu_path, ne.path);
       if (score > best || aff.nearest_nic.empty()) {
         best = score;
         aff.nearest_nic = ne.dev;
       }
     }
-    // A tie means the BDFs can't tell the NICs apart (e.g. no PCIe switch, so
+    // A tie means the paths can't tell the NICs apart (e.g. no PCIe switch, so
     // every pair looks the same): record it so selection doesn't trust it.
     int at_best = 0;
     for (const auto& ne : nic_entries)
-      if (common_prefix(gpu.bdf, ne.bdf) == best) ++at_best;
+      if (pci_path_shared_depth(gpu_path, ne.path) == best) ++at_best;
     aff.ambiguous = at_best > 1;
     result.push_back(std::move(aff));
   }
@@ -854,6 +834,36 @@ std::string decode_hip_version(int version) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%ld.%ld.%ld", major, minor, patch);
   return buf;
+}
+
+std::string kfd_location_bdf(const std::string& location_id,
+                             const std::string& domain) {
+  // Strict decimal; -1 for anything else or anything above `max`.
+  auto parse = [](const std::string& s, unsigned long max) -> long {
+    if (s.empty() || s.size() > 10) return -1;
+    for (const char c : s)
+      if (c < '0' || c > '9') return -1;
+    const unsigned long v = std::stoul(s);
+    return v > max ? -1 : static_cast<long>(v);
+  };
+  const long loc = parse(location_id, 0xFFFF);
+  if (loc < 0) return std::string();
+  const long dom = domain.empty() ? 0 : parse(domain, 0xFFFF);
+  if (dom < 0) return std::string();
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%04lx:%02lx:%02lx.%lx", dom, (loc >> 8) & 0xFF,
+                (loc >> 3) & 0x1F, loc & 0x07);
+  return buf;
+}
+
+int pci_path_shared_depth(const std::string& a, const std::string& b) {
+  if (a.empty() || b.empty()) return 0;
+  std::istringstream sa(a), sb(b);
+  std::string ca, cb;
+  int depth = 0;
+  while (std::getline(sa, ca, '/') && std::getline(sb, cb, '/') && ca == cb)
+    if (!ca.empty()) ++depth;
+  return depth;
 }
 
 std::optional<std::string> find_info_version(const std::string& start_dir,

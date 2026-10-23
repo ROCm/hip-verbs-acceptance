@@ -134,6 +134,17 @@ struct EnvironmentInfo {
 // arithmetic, no HIP dependency -- unit-testable without HIP.
 std::string decode_hip_version(int version);
 
+// A KFD topology node's PCIe BDF ("dddd:bb:dd.f") from its `location_id` and
+// `domain` properties. KFD prints both in decimal; location_id is the PCI
+// device id, (bus << 8) | devfn. "" when location_id is not a number.
+std::string kfd_location_bdf(const std::string& location_id,
+                             const std::string& domain);
+
+// How many leading components two sysfs device paths share
+// ("/sys/devices/pci0000:00/0000:00:01.1/..."): the deeper the shared PCIe
+// ancestor, the closer the devices. 0 when either path is empty.
+int pci_path_shared_depth(const std::string& a, const std::string& b);
+
 // Walk from `start_dir` up through at most `max_levels` parent directories
 // (start_dir itself is level 0) looking for "<dir>/.info/version". Returns the
 // first line of the first one found (trailing CR/LF stripped), or
