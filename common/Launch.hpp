@@ -33,6 +33,12 @@ struct RankPlacement {
 // matches a fully qualified `self_hostname` and vice versa.
 bool host_is_local(const std::string& host, const std::string& self_hostname);
 
+// True when `host` resolves (DNS for a name) to an address assigned to one of
+// this machine's interfaces: an IP or alias of this host that host_is_local()
+// can't tell by name. False when it does not resolve. Only assigned addresses
+// count, so 127.0.0.2 is not this host.
+bool host_has_local_address(const std::string& host);
+
 // Ranks per host actually used: `ppn` when given (> 0), else
 // ceil(np / #hosts). An empty host list counts as one host (localhost).
 int effective_ppn(int np, int ppn, std::size_t num_hosts);
@@ -48,6 +54,10 @@ std::string validate_launch(int np, bool np_explicit, int ppn,
 std::vector<RankPlacement> plan_ranks(int np, int ppn,
                                       const std::vector<std::string>& hosts,
                                       const std::string& self_hostname);
+
+// Also mark the ranks whose host host_has_local_address() as local, one lookup
+// per host. Separate from plan_ranks() so that one stays free of DNS.
+void mark_local_addresses(std::vector<RankPlacement>& plan);
 
 // The launcher-side options that shape each worker's command line: the
 // subset of main.cc's Options a worker needs, so the argv builder is

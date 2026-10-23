@@ -178,7 +178,7 @@ Pair select_pair(const EnvironmentInfo& env, int local_rank, const std::string& 
     s.gpu = device;
     s.gpu_source = "user";
     if (!is_gpu_visible(env, device) && (env.gpu_count > 0 || !env.gpu_devices.empty()))
-      notes.push_back(gpu_name(device) + " is not visible on this host");
+      s.error = gpu_name(device) + " is not visible on this host";
   } else if (!hca.empty()) {
     const int g = get_nearest_gpu(env, hca);
     if (g >= 0) {
@@ -200,11 +200,13 @@ Pair select_pair(const EnvironmentInfo& env, int local_rank, const std::string& 
   if (!hca.empty()) {
     s.hca = hca;
     s.hca_source = "user";
-    if (find_nic(env, hca) == nullptr)
-      notes.push_back("HCA " + hca + " is not present on this host");
-    else if (device >= 0 && aff_usable && aff->nearest_nic != hca)
+    if (find_nic(env, hca) == nullptr) {
+      const std::string e = "HCA " + hca + " is not present on this host";
+      s.error += (s.error.empty() ? "" : "; ") + e;
+    } else if (device >= 0 && aff_usable && aff->nearest_nic != hca) {
       notes.push_back("HCA " + hca + " is not the nearest NIC to " + gpu_name(s.gpu) +
                       " (nearest: " + aff->nearest_nic + ")");
+    }
   } else if (aff_usable && is_nic_active(env, aff->nearest_nic)) {
     s.hca = aff->nearest_nic;
     s.hca_source = "affinity";

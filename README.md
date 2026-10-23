@@ -48,8 +48,11 @@ keeping the auto-policy lookup (`<binary_dir>/policy/...`) working out of the bo
 ### 3. Run the Verbs tests (two ranks / two nodes)
 
 The RDMA data-path tests need two endpoints. The launch flags follow mpirun:
-`-n` total ranks (1 or 2), `-ppn` ranks per host, `-hosts` the host list
-(default `localhost`). On one host, use two local ranks:
+`-n` total ranks, `-ppn` ranks per host, `-hosts` the host list (default
+`localhost`; a name or address of this machine runs there without ssh). The
+two-rank tests run only with `-n 2`; any other `-n` runs the single-rank tests
+on every rank (e.g. `-n 8` covers 8 GPUs at once) and prints a `note:` for the
+two-rank tests it leaves out. On one host, use two local ranks:
 
 ```bash
 ./build/hva -n 2 --filter-category 'verbs/*' \
@@ -61,7 +64,8 @@ overrides), NIC = that GPU's nearest ACTIVE NIC (`--hca` overrides). Both flags
 take one value or one per local rank, e.g. `-n 2 --device 0,4` or
 `-n 2 --hca bnxt_re0,bnxt_re1`; `--hca` alone picks the GPU nearest to it. When
 affinity is unknown (or ties), the first ACTIVE NIC is used and a `note:` line
-says why. A `topology:` line per rank prints the pair before the test lines
+says why. A `--device` or `--hca` the host does not have is an error (exit 2).
+A `topology:` line per rank prints the pair before the test lines
 (e.g. `topology: rank 1 on node1: GPU 1 (default), HCA bnxt_re1 (affinity)`),
 and each node's `topology` in `report.json` records it. Pinning both ranks to
 one NIC (`--hca bnxt_re0`) makes it a single-NIC loopback check.
@@ -173,7 +177,7 @@ not a suite defect.
 | `--policy <file>` | use a specific policy CSV directly (highest priority) |
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
-| `-n`, `-np` `<n>` | total ranks, 1 (default) or 2; two ranks are launched as workers and reconciled (for `verbs/*` two-node tests) |
+| `-n`, `-np` `<n>` | total ranks (default 1); more than one are launched as workers and reconciled. The two-rank (`verbs/*` two-node) tests run only with `-n 2` |
 | `-ppn <p>` | ranks per host (default `ceil(n / #hosts)`), filled in block order as with mpirun |
 | `-hosts h1[,h2]` | hosts to place ranks on (default `localhost`); ranks on other hosts start via `--remote-launcher` |
 | `--hca <name>[,...]` | RDMA device per local rank (default: the GPU's nearest ACTIVE NIC) |

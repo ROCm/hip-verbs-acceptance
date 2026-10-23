@@ -753,7 +753,9 @@ EnvironmentInfo fake_env() {
     d.netdev = "eth" + std::to_string(i);
     d.fw_ver = "0.0.0";
     d.board_id = "FAKE0000";
-    d.node_guid = "0000:0000:0000:000" + std::to_string(i);
+    char guid[32];
+    std::snprintf(guid, sizeof(guid), "0000:0000:0000:%04x", i);
+    d.node_guid = guid;
     d.gid_index = 3;
     d.gid_type = "RoCE v2";
     d.port_state = "ACTIVE";
@@ -763,7 +765,9 @@ EnvironmentInfo fake_env() {
     GpuDevice g;
     g.ordinal = i;
     g.hip_ordinal = i;
-    g.bdf = "0000:0" + std::to_string(i) + ":00.0";
+    char bdf[32];
+    std::snprintf(bdf, sizeof(bdf), "0000:%02x:00.0", i);
+    g.bdf = bdf;
     g.numa_node = i < 4 ? 0 : 1;
     g.arch = "gfx-fake";
     env.gpu_devices.push_back(g);

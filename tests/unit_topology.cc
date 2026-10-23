@@ -127,14 +127,19 @@ void test_user_choices() {
     const Pair s = select_pair(env, 0, "mlx5_9", -1);
     CHECK_EQ_STR(s.hca, std::string("mlx5_9"), "absent --hca kept as given");
     CHECK(s.gpu == 0 && s.gpu_source == "default", "no GPU near it -> default");
-    CHECK(has(s.note, "HCA mlx5_9 is not present"), s.note.c_str());
+    CHECK(has(s.error, "HCA mlx5_9 is not present"), s.error.c_str());
     CHECK(has(s.note, "no GPU is known to be nearest to mlx5_9"), s.note.c_str());
   }
   {
     const Pair s = select_pair(env, 0, "", 9);
     CHECK(s.gpu == 9 && s.gpu_source == "user", "non-visible --device kept");
-    CHECK(has(s.note, "GPU 9 is not visible"), s.note.c_str());
+    CHECK(has(s.error, "GPU 9 is not visible"), s.error.c_str());
     CHECK(s.hca == "n0" && s.hca_source == "default", "no affinity for it -> first ACTIVE");
+  }
+  {
+    const Pair s = select_pair(env, 0, "mlx5_9", 9);
+    CHECK(has(s.error, "GPU 9 is not visible on this host; HCA mlx5_9 is not present"),
+          s.error.c_str());
   }
 }
 
@@ -177,7 +182,7 @@ void test_no_affinity() {
     CHECK(s.gpu == 1, "visible by count");
     CHECK(s.hca == "n0" && s.hca_source == "default", "first ACTIVE NIC");
     CHECK_EQ_STR(s.note, std::string(""), "no GPU list -> no note");
-    CHECK(has(select_pair(env, 0, "", 5).note, "GPU 5 is not visible"),
+    CHECK(has(select_pair(env, 0, "", 5).error, "GPU 5 is not visible"),
           "beyond the count is not visible");
   }
   {

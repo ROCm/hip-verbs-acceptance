@@ -1198,7 +1198,7 @@ fi
 
 # ===========================================================================
 # Check (u): -n / -ppn / -hosts validation and the removed flags all exit 2,
-# before anything is launched: -n 3 (only 1 or 2 ranks), -n 2 -ppn 1 on one
+# before anything is launched: -n 0 (at least 1 rank), -n 2 -ppn 1 on one
 # host (does not fit), a duplicate host, two hosts without -n (it would
 # quietly run one rank), and the old --local-ranks / --nodes flags.
 # ===========================================================================
@@ -1212,7 +1212,7 @@ u_expect2() {
   [ "$rc" -eq 2 ] || U_FAILS="$U_FAILS
 $label: exit=$rc (want 2): $out"
 }
-u_expect2 "-n 3"               -n 3
+u_expect2 "-n 0"               -n 0
 u_expect2 "-n 2 -ppn 1"        -n 2 -ppn 1
 u_expect2 "duplicate host"     -n 2 -ppn 1 -hosts nosuch.invalid,nosuch.invalid
 u_expect2 "2 hosts without -n" -hosts nosuch1.invalid,nosuch2.invalid
@@ -1223,7 +1223,7 @@ if [ -n "$U_FAILS" ]; then
 elif [ -f "$TMP/rep_u.json" ]; then
   fail "launch validation" "a rejected invocation wrote a report"
 else
-  pass "launch validation (-n 3 / does-not-fit / duplicate host / 2 hosts without -n / removed --local-ranks and --nodes) all exit 2"
+  pass "launch validation (-n 0 / does-not-fit / duplicate host / 2 hosts without -n / removed --local-ranks and --nodes) all exit 2"
 fi
 
 # ===========================================================================
@@ -1272,8 +1272,8 @@ fi
 # GPUs 4-7 nearest bnxt_re1). -n 2 --device 0,4 gives each local rank its own
 # GPU and, by affinity, its own NIC; --hca alone picks the nearest GPU; a
 # non-nearest pair runs with a note; each rank prints a "topology:" header.
-# A NIC name in --device and a list that is neither 1 nor -ppn entries long
-# are usage errors (exit 2).
+# A NIC name in --device, a list that is neither 1 nor -ppn entries long, and
+# a --device / --hca this host does not have are errors (exit 2).
 # ===========================================================================
 REP_W="$TMP/rep_sel.json"
 LOG_W="$TMP/sel.log"
@@ -1293,6 +1293,9 @@ run_bin "$TMP/sel_bad1.log" --device mlx5_0 --filter 'syn_pass'
 RC_W4=$RC
 run_bin "$TMP/sel_bad2.log" -n 2 --hca a,b,c --filter 'syn2_barrier'
 RC_W5=$RC
+ACCEPT_FAKE_ENV=1 run_bin "$TMP/sel_bad3.log" --device 9 --hca mlx5_9 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$TMP/rep_sel_bad3.json"
+RC_W6=$RC
 
 if [ "$RC_W1" -ne 0 ] || [ "$RC_W2" -ne 0 ] || [ "$RC_W3" -ne 0 ]; then
   fail "GPU/HCA selection" "exit codes $RC_W1/$RC_W2/$RC_W3 (want 0/0/0)"
@@ -1303,6 +1306,11 @@ elif [ "$RC_W4" -ne 2 ] || ! grep -q 'use --hca for the RDMA device' "$TMP/sel_b
 elif [ "$RC_W5" -ne 2 ] || ! grep -q -- '--hca lists 3 entries' "$TMP/sel_bad2.log"; then
   fail "GPU/HCA selection" "-n 2 --hca a,b,c: exit $RC_W5 (want 2)"
   cat "$TMP/sel_bad2.log"
+elif [ "$RC_W6" -ne 2 ] || [ -f "$TMP/rep_sel_bad3.json" ] ||
+     ! grep -q '^error: GPU 9 is not visible on this host; HCA mlx5_9 is not present on this host$' \
+       "$TMP/sel_bad3.log"; then
+  fail "GPU/HCA selection" "--device 9 --hca mlx5_9: exit $RC_W6 (want 2, no report)"
+  cat "$TMP/sel_bad3.log"
 elif ! grep -q 'note: HCA bnxt_re1 is not the nearest NIC to GPU 0 (nearest: bnxt_re0)' "$LOG_W3"; then
   fail "GPU/HCA selection" "--hca bnxt_re1 --device 0 printed no note"
   cat "$LOG_W3"
@@ -1331,7 +1339,70 @@ PYEOF
 then
   fail "GPU/HCA selection" "$(cat "$TMP/w_out.txt")"
 else
-  pass "GPU/HCA selection (-n 2 --device 0,4 -> bnxt_re0/bnxt_re1, --hca bnxt_re1 -> GPU 4, far pair noted, headers printed, bad --device / list length exit 2)"
+  pass "GPU/HCA selection (-n 2 --device 0,4 -> bnxt_re0/bnxt_re1, --hca bnxt_re1 -> GPU 4, far pair noted, headers printed, bad --device / list length / missing GPU+HCA exit 2)"
+fi
+
+# ===========================================================================
+# Check (x): more than 2 ranks. -n 3 on one host runs the single-rank tests on
+# every rank, each on its own GPU (= local rank), and leaves the two-rank tests
+# out with a note.
+# ===========================================================================
+REP_X="$TMP/rep_n3.json"
+LOG_X="$TMP/n3.log"
+# The glob selects exactly syn_pass and syn2_barrier.
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_X" -n 3 --filter 'syn[2_][_p][ba][as][sr]*' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_X"
+RC_X=$RC
+if [ "$RC_X" -ne 0 ] || [ ! -f "$REP_X" ]; then
+  fail "-n 3" "exit=$RC_X (want 0)"
+  cat "$LOG_X"
+elif ! grep -q '^note: 1 two-rank test(s) not run: they need -n 2$' "$LOG_X"; then
+  fail "-n 3" "no note about the two-rank test left out"
+  cat "$LOG_X"
+elif ! "$PY" -c '
+import json, sys
+rep = json.load(open(sys.argv[1]))
+ok = ([(t["id"], t["status"]) for t in rep["tests"]] == [("syn_pass", "pass")] and
+      [n["topology"]["gpu"] for n in rep["nodes"]] == [0, 1, 2] and
+      rep.get("launch") == {"np": 3, "ppn": 3, "hosts": ["localhost"]})
+sys.exit(0 if ok else 1)' "$REP_X"; then
+  fail "-n 3" "want syn_pass only, GPUs 0/1/2, launch np 3 in $REP_X"
+  cat "$LOG_X"
+else
+  pass "-n 3 (syn_pass on 3 ranks / GPUs 0-2, syn2_barrier left out with a note)"
+fi
+
+# ===========================================================================
+# Check (y): a host given as one of this machine's interface addresses is
+# local. With -hosts 127.0.0.1,<this host's IP> and an ssh that always fails,
+# the run only passes if both ranks are fork/exec'd here. The IP is the source
+# address of the default route (a UDP connect sends nothing); skipped without
+# one.
+# ===========================================================================
+SELF_IP=$("$PY" -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("192.0.2.1", 9))
+print(s.getsockname()[0])' 2>/dev/null)
+if [ -z "$SELF_IP" ] || [ "${SELF_IP#127.}" != "$SELF_IP" ]; then
+  pass "host by address is local (SKIPPED: no default-route address)"
+else
+  LOG_Y="$TMP/self_ip.log"
+  NOSSH="$TMP/nossh"
+  mkdir -p "$NOSSH"
+  printf '#!/bin/sh\necho "fake ssh: should not be called" >&2\nexit 255\n' >"$NOSSH/ssh"
+  chmod +x "$NOSSH/ssh"
+  PATH="$NOSSH:$PATH" run_bin "$LOG_Y" -n 2 -ppn 1 -hosts "127.0.0.1,$SELF_IP" \
+      --filter 'syn2_barrier' --vendor synthetic --policy "$POLICY/synthetic.csv" \
+      --report "$TMP/rep_self_ip.json"
+  RC_Y=$RC
+  if [ "$RC_Y" -ne 0 ] ||
+     ! grep -q "rank 0 on 127.0.0.1 (local), rank 1 on $SELF_IP (local)" "$LOG_Y"; then
+    fail "host by address is local" "exit=$RC_Y; want both ranks local"
+    cat "$LOG_Y"
+  else
+    pass "host by address is local (-hosts 127.0.0.1,$SELF_IP: both ranks fork/exec'd)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

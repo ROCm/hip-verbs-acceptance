@@ -26,7 +26,9 @@
 //                     --device-only rule
 //
 // When affinity is unknown or can't tell NICs apart, the fallback applies and
-// `note` says why; that is never an error. The rank then writes the resolved
+// `note` says why; that is never an error. A --device this host does not show
+// or a --hca it does not have is: `error` says which, and the rank exits 2
+// instead of running on something else. The rank then writes the resolved
 // pair back into ACCEPT_HCA / ACCEPT_DEVICE, so isolated test children
 // (hva --exec) use it without probing again: get_rank_hca() and get_rank_gpu()
 // read those.
@@ -55,6 +57,8 @@ struct Pair {
   std::string gpu_source;   // "user" | "affinity" | "default"
   bool        local = false; // affinity confirms hca is gpu's nearest NIC
   std::string note;         // why a fallback was taken; "" when none
+  std::string error;        // an explicit --hca / --device this host can't
+                            // satisfy; "" when none. The rank must not run.
 };
 
 // For each GPU, the RDMA device whose sysfs PCIe path shares the deepest

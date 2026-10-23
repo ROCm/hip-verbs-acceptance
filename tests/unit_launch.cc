@@ -5,7 +5,8 @@
  ************************************************************************/
 
 // unit_launch — unit tests for rank placement and the worker argv
-// (common/Launch.*): host_is_local, validate_launch, plan_ranks and
+// (common/Launch.*): host_is_local, host_has_local_address /
+// mark_local_addresses, validate_launch, plan_ranks and
 // build_worker_args (each forwarded flag appears once, for local and remote
 // ranks alike).
 
@@ -49,6 +50,25 @@ void test_host_is_local() {
   CHECK(!host_is_local("n0", ""), "unknown self hostname: only localhost matches");
 }
 
+// Numeric hosts only, so no DNS: loopback is assigned to lo, 127.0.0.2 and
+// TEST-NET-1 are not ours.
+void test_host_has_local_address() {
+  CHECK(host_has_local_address("127.0.0.1"), "127.0.0.1 is this host");
+  CHECK(!host_has_local_address("127.0.0.2"), "an unassigned loopback is not");
+  CHECK(!host_has_local_address("192.0.2.1"), "TEST-NET-1 is not this host");
+  CHECK(!host_has_local_address(""), "empty is not this host");
+
+  std::vector<RankPlacement> plan(3);
+  plan[0].host = "127.0.0.1";
+  plan[1].host = "192.0.2.1";
+  plan[2].host = "localhost";
+  plan[2].is_local = true;
+  mark_local_addresses(plan);
+  CHECK(plan[0].is_local, "an address of this host is marked local");
+  CHECK(!plan[1].is_local, "another address stays remote");
+  CHECK(plan[2].is_local, "already local stays local");
+}
+
 void test_validate_launch() {
   using V = std::vector<std::string>;
   CHECK(validate_launch(1, false, 0, {}).empty(), "default: 1 local rank");
@@ -59,7 +79,8 @@ void test_validate_launch() {
         "-n 2 -hosts a,b (ppn defaults to 1)");
   CHECK(validate_launch(1, false, 0, V{"b"}).empty(), "-hosts b: one remote rank");
 
-  CHECK(!validate_launch(3, true, 0, {}).empty(), "-n 3 rejected");
+  CHECK(validate_launch(3, true, 0, {}).empty(), "-n 3 local");
+  CHECK(validate_launch(8, true, 4, V{"a", "b"}).empty(), "-n 8 -ppn 4 -hosts a,b");
   CHECK(!validate_launch(0, true, 0, {}).empty(), "-n 0 rejected");
   CHECK(!validate_launch(2, true, 1, {}).empty(),
         "-n 2 -ppn 1 on one host rejected (does not fit)");
@@ -199,6 +220,7 @@ void test_build_worker_args() {
 
 void run_launch_tests() {
   test_host_is_local();
+  test_host_has_local_address();
   test_validate_launch();
   test_plan_ranks();
   test_build_worker_args();

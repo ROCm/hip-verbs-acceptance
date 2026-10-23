@@ -243,14 +243,18 @@ node-validated. Rank→worker args are passed on the **CLI**
 on each ssh child's stdout. Step 1 below is currently same-path/NFS (scp-deploy for
 non-shared-FS is deferred — §13).*
 
-1. LAUNCH mode places the ranks over `-hosts` (block order, `-ppn` per host)
-   and runs each remote rank's binary at
+1. LAUNCH mode places the ranks over `-hosts` (block order, `-ppn` per host;
+   a host named by this machine's name, or by one of its interface addresses,
+   is local and fork/exec'd) and runs each remote rank's binary at
    `--remote-binary` (default: the launcher's own path — same-path/shared-FS
    assumption; scp-deploy is deferred, §13).
 2. Starts each node's binary in WORKER mode, passing `rank`, `size`, and the
    rank-0 `rendezvous host:port`.
-3. Workers construct `SocketBootstrap`, rendezvous, run their tests, and stream
-   their node-local result set back on stdout (`--results-out -`).
+3. Workers run their tests and stream their node-local result set back on
+   stdout (`--results-out -`). Only a 2-rank run constructs `SocketBootstrap`
+   and rendezvous first: the TwoNode tests need exactly 2 ranks, so any other
+   `-n` leaves them out (with a `note:`) and runs the single-rank tests on every
+   rank.
 4. LAUNCH mode collects the per-node results and the Reporter merges them.
 
 ---
@@ -821,7 +825,7 @@ environment is auto-detected.
 
 ```
 hva                            # single-node loopback, all func tests
-hva -n 2 [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
+hva -n <n> [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
            [--remote-launcher ssh|srun]     # default: ssh
            [--ssh-user <name>]              # default: ~/.ssh/config / current user
            [--port <n>] [--remote-binary <path>] [--launch-timeout <sec>]

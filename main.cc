@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -109,7 +110,7 @@ struct Options {
 
   // Launcher (mpirun-style). Ranks on this host are fork/exec'd; ranks on
   // other hosts are started over ssh or srun.
-  int         np = 1;               // -n/-np/--np N (total ranks; 1 or 2)
+  int         np = 1;               // -n/-np/--np N (total ranks)
   bool        np_explicit = false;  // true when -n was passed
   int         ppn = 0;              // -ppn/--ppn P (0 = ceil(N / #hosts))
   std::string hosts;                // -hosts/--hosts h0,h1 (empty = localhost)
@@ -232,7 +233,7 @@ void print_usage(std::FILE* out) {
     "  --worker              Run one rank (spawned by the launcher)\n"
     "  --rank <n>            This worker's rank\n"
     "  --local-rank <n>      This worker's rank on its host\n"
-    "  --size <n>            Total rank count (1 or 2)\n"
+    "  --size <n>            Total rank count\n"
     "  --rendezvous H:P      Rank-0 listener host:port for the socket bootstrap\n"
     "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n"
     "  --deadline-sec <s>    Worker self-destruct deadline. Set automatically by\n"
@@ -386,10 +387,8 @@ int parse_args(int argc, char** argv, Options& opt) {
     } else if (a == "-n" || a == "-np" || a == "--np") {
       long v = 0;
       if (!take_int(argc, argv, i, a.c_str(), v)) return 2;
-      // Two-rank tests hardcode their peer as 1 - ctx.rank, and
-      // SocketBootstrap is scoped to size <= 2.
-      if (v < 1 || v > 2) {
-        std::fprintf(stderr, "error: %s must be 1 or 2 (got %ld)\n", a.c_str(), v);
+      if (v < 1 || v > INT_MAX) {
+        std::fprintf(stderr, "error: %s must be at least 1 (got %ld)\n", a.c_str(), v);
         return 2;
       }
       opt.np = static_cast<int>(v);
@@ -562,7 +561,8 @@ std::string prepare_test(const TestMeta& meta) {
 // pair would leak into its workers' inherited / forwarded environment. The
 // header goes to stderr: a worker's stdout carries its results. The launcher
 // only shows a worker's stderr on failure and prints the pair itself. False
-// (after an error line) when the GPU can't be made current.
+// (after an error line) when an explicit --hca / --device is not on this host
+// or the GPU can't be made current.
 bool apply_topology(const Options& opt, bool worker) {
   const topology::Pair& pair = environment().rank_pair;
   if (!opt.quiet) {
@@ -571,6 +571,10 @@ bool apply_topology(const Options& opt, bool worker) {
                  topology::format_pair(pair).c_str());
   }
   if (!pair.note.empty()) std::fprintf(stderr, "note: %s\n", pair.note.c_str());
+  if (!pair.error.empty()) {
+    std::fprintf(stderr, "error: %s\n", pair.error.c_str());
+    return false;
+  }
   if (!pair.hca.empty()) ::setenv("ACCEPT_HCA", pair.hca.c_str(), 1);
   ::setenv("ACCEPT_DEVICE", std::to_string(pair.gpu).c_str(), 1);
   if (const std::string err = set_current_gpu(pair.gpu); !err.empty()) {
@@ -682,6 +686,16 @@ size_t eligible_count(bool exclude_two_node) {
     ++n;
   }
   return n;
+}
+
+// The two-rank tests run only with exactly 2 ranks; any other size leaves them
+// out of the run and the report. Say so, so a 1- or 8-rank run that selected
+// some does not look complete.
+void note_two_rank_tests(const Options& opt, int size) {
+  if (size == 2 || opt.quiet) return;
+  const size_t n = select_tests(opt, false).size() - select_tests(opt, true).size();
+  if (n > 0)
+    std::fprintf(stderr, "note: %zu two-rank test(s) not run: they need -n 2\n", n);
 }
 
 constexpr const char* kDefaultReportPath = "./report.json";
@@ -876,6 +890,7 @@ int do_run(const Options& opt) {
   const std::vector<TestMeta> selected =
       fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/true, in);
   const Partition part = classify_and_partition(selected, policy, opt, environment());
+  note_two_rank_tests(opt, 1);
 
   RunnerOptions ropts;
   ropts.isolate = opt.isolate;
@@ -1027,32 +1042,30 @@ int do_worker(const Options& opt) {
     std::fprintf(stderr, "error: --worker requires --results-out\n");
     return 2;
   }
-  if (opt.size < 1 || opt.size > 2) {
-    std::fprintf(stderr, "error: --worker supports size 1 or 2 (got %d)\n",
-                 opt.size);
+  if (opt.size < 1) {
+    std::fprintf(stderr, "error: --worker needs --size >= 1 (got %d)\n", opt.size);
     return 2;
   }
   if (!apply_topology(opt, /*worker=*/true)) return 2;
 
-  // Construct bootstrap; failure is a hard error (exit 4).
+  // Only a 2-rank run connects its ranks: the two-rank tests are the only ones
+  // with a peer, and they run only then. Failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
-  try {
-    if (opt.size == 1) {
-      boot = std::make_unique<LoopbackBootstrap>();
-    } else {
-      std::string host;
-      int port = 0;
-      if (!parse_rendezvous(opt.rendezvous, host, port)) {
-        std::fprintf(stderr, "error: bad --rendezvous '%s' (want HOST:PORT)\n",
-                     opt.rendezvous.c_str());
-        return 2;
-      }
-      boot = std::make_unique<SocketBootstrap>(opt.rank, opt.size, host, port);
+  if (opt.size == 2) {
+    std::string host;
+    int port = 0;
+    if (!parse_rendezvous(opt.rendezvous, host, port)) {
+      std::fprintf(stderr, "error: bad --rendezvous '%s' (want HOST:PORT)\n",
+                   opt.rendezvous.c_str());
+      return 2;
     }
-  } catch (const std::exception& ex) {
-    std::fprintf(stderr, "error: bootstrap failed (rank %d): %s\n", opt.rank,
-                 ex.what());
-    return 4;  // 4 = bootstrap failure (hard error)
+    try {
+      boot = std::make_unique<SocketBootstrap>(opt.rank, opt.size, host, port);
+    } catch (const std::exception& ex) {
+      std::fprintf(stderr, "error: bootstrap failed (rank %d): %s\n", opt.rank,
+                   ex.what());
+      return 4;  // 4 = bootstrap failure (hard error)
+    }
   }
 
   const std::string vendor = resolve_vendor(opt);
@@ -1064,7 +1077,7 @@ int do_worker(const Options& opt) {
   const bool discovery = !policy.present;
 
   const std::vector<TestMeta> selected =
-      select_tests(opt, /*exclude_two_node=*/opt.size == 1);
+      select_tests(opt, /*exclude_two_node=*/opt.size != 2);
   const Partition part = classify_and_partition(selected, policy, opt, environment());
 
   RunnerOptions ropts;
@@ -1075,7 +1088,7 @@ int do_worker(const Options& opt) {
   ropts.classifications = part.classifications;
   for (const auto& s : part.skipped_lines)
     ropts.skipped_lines.push_back({s.category, s.line});
-  ropts.boot = boot.get();   // shared bootstrap for in-process (TwoNode) tests
+  ropts.boot = boot.get();   // TwoNode tests' peer link; null => per-test loopback
   ropts.rank = opt.rank;
   ropts.size = opt.size;
   Runner runner(ropts);
@@ -1171,19 +1184,28 @@ const char* launcher_name(RemoteLauncher l) {
 }
 
 // This host's name, used to tell local ranks from remote ones. "" when
-// gethostname() fails: then only localhost/127.0.0.1 count as local.
+// gethostname() fails: then only localhost/127.0.0.1 and this host's
+// addresses count as local.
 std::string self_hostname() {
   char buf[256] = {};
   if (::gethostname(buf, sizeof(buf) - 1) != 0) return "";
   return buf;
 }
 
+// plan_ranks(), with a host given as one of this machine's addresses or
+// aliases also counted as local (no ssh / srun back to ourselves).
+std::vector<RankPlacement> plan_job(const Options& opt, const std::string& self) {
+  std::vector<RankPlacement> plan =
+      plan_ranks(opt.np, opt.ppn, split_nodes(opt.hosts), self);
+  mark_local_addresses(plan);
+  return plan;
+}
+
 // True when -n / -ppn / -hosts need the launcher: more than one rank, or a
 // rank on another host. A single local rank runs in-process (do_run).
 bool needs_launch(const Options& opt) {
   if (opt.np > 1) return true;
-  for (const RankPlacement& p :
-       plan_ranks(opt.np, opt.ppn, split_nodes(opt.hosts), self_hostname()))
+  for (const RankPlacement& p : plan_job(opt, self_hostname()))
     if (!p.is_local) return true;
   return false;
 }
@@ -1196,16 +1218,16 @@ bool needs_launch(const Options& opt) {
 int do_launch(const Options& opt) {
   const std::vector<std::string> hosts = split_nodes(opt.hosts);
   const std::string self = self_hostname();
-  const std::vector<RankPlacement> plan =
-      plan_ranks(opt.np, opt.ppn, hosts, self);
+  const std::vector<RankPlacement> plan = plan_job(opt, self);
   const int size = opt.np;
   const bool all_local =
       std::all_of(plan.begin(), plan.end(),
                   [](const RankPlacement& p) { return p.is_local; });
 
-  // Rendezvous: rank 0 listens (binds 0.0.0.0) and the other rank dials it.
-  // All local: loopback on a free port. Otherwise rank 0's host on --port; a
-  // remote rank can't dial "localhost", so name this machine instead.
+  // Rendezvous (used by 2-rank runs only): rank 0 listens (binds 0.0.0.0) and
+  // the other rank dials it. All local: loopback on a free port. Otherwise
+  // rank 0's host on --port; a remote rank can't dial "localhost", so name this
+  // machine instead.
   std::string rendezvous;
   if (all_local) {
     const int port = pick_free_port();
@@ -1317,9 +1339,10 @@ int do_launch(const Options& opt) {
                std::to_string(p.rank) + " on " + p.host + " (" +
                how(p.is_local) + ")";
     }
-    std::fprintf(stderr, "launching %d rank(s): %s; rendezvous=%s%s%s\n",
-                 size, where.c_str(), rendezvous.c_str(),
-                 all_local ? "" : " binary=", remote_binary.c_str());
+    const std::string rdv = size == 2 ? "; rendezvous=" + rendezvous : "";
+    std::fprintf(stderr, "launching %d rank(s): %s%s%s%s\n", size, where.c_str(),
+                 rdv.c_str(), all_local ? "" : "; binary=", remote_binary.c_str());
+    note_two_rank_tests(opt, size);
   }
 
   const std::vector<SshChildResult> children = ssh_launch(specs, lopts);
@@ -1363,11 +1386,11 @@ int do_launch(const Options& opt) {
   if (!load_policy_or_fail(opt, vendor, policy, rc)) return rc;
   const bool discovery = !policy.present;
 
-  // A 2-rank run keeps TwoNode tests; size-1 excludes them (cannot satisfy a
-  // 2-rank test). Mirror the worker's selection scope so the denominator and the
-  // synthesized NA set match what actually ran.
+  // A 2-rank run keeps TwoNode tests; any other size excludes them (they need
+  // exactly 2 ranks). Mirror the worker's selection scope so the denominator and
+  // the synthesized NA set match what actually ran.
   ReportInputs in;
-  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size == 1, in);
+  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size != 2, in);
   // Placeholder envs: load_rank_results_text() replaces each with the
   // worker's @env block.
   for (const auto& c : children)
