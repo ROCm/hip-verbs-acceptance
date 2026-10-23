@@ -524,19 +524,36 @@ int parse_args(int argc, char** argv, Options& opt) {
   return 0;
 }
 
-// --list: one line per registered test with its metadata.
-// hipSetDevice(g) when the HIP runtime is there; a GPU that is not visible is
-// left to the tests to report.
-void make_gpu_current(int g) {
+// hipSetDevice(g) when the HIP runtime is there. Returns why it failed, or ""
+// on success and when there is no GPU at all (no HIP runtime or no device):
+// verbs-only runs need none, and the HIP tests report that themselves.
+std::string make_gpu_current(int g) {
 #ifdef ACCEPT_HAVE_HIP
-  if (!hipw::init_result().hip_lib_loaded) return;
+  if (!hipw::init_result().hip_lib_loaded) return "";
   try {
-    (void)hipSetDevice(g);
+    const hipError_t e = hipSetDevice(g);
+    if (e == hipSuccess) return "";
+    int n = 0;
+    if (hipGetDeviceCount(&n) != hipSuccess || n == 0) return "";
+    return "hipSetDevice(" + std::to_string(g) + ") failed: " + hipGetErrorString(e) +
+           " (" + std::to_string(n) + " GPU(s) visible)";
   } catch (const hipw::MissingSymbol&) {
+    return "";
   }
 #else
   (void)g;
+  return "";
 #endif
+}
+
+// Make gpu() current before a test body: the previous in-process test may
+// have left another GPU current. Tests that fork before their first HIP call
+// select gpu() themselves: a child inheriting an initialized HIP runtime
+// cannot use it.
+std::string prepare_test(const TestMeta& meta) {
+  if (meta.category == "hip/ipc" || meta.id == "Vmm_Reclaim_Cycles_CrossProcess")
+    return "";
+  return make_gpu_current(gpu());
 }
 
 // Resolve this rank's GPU and HCA (detect()), say why if a fallback was
@@ -544,8 +561,9 @@ void make_gpu_current(int g) {
 // --exec children. Only for processes that run tests: a launcher's resolved
 // pair would leak into its workers' inherited / forwarded environment. The
 // header goes to stderr: a worker's stdout carries its results. The launcher
-// only shows a worker's stderr on failure and prints the pair itself.
-void apply_selection(const Options& opt, bool worker) {
+// only shows a worker's stderr on failure and prints the pair itself. False
+// (after an error line) when the GPU can't be made current.
+bool apply_selection(const Options& opt, bool worker) {
   const Selection& sel = environment().selection;
   if (!opt.quiet) {
     const std::string who = worker ? "rank " + std::to_string(opt.rank) + ": " : "";
@@ -554,9 +572,14 @@ void apply_selection(const Options& opt, bool worker) {
   if (!sel.note.empty()) std::fprintf(stderr, "note: %s\n", sel.note.c_str());
   if (!sel.hca.empty()) ::setenv("ACCEPT_HCA", sel.hca.c_str(), 1);
   ::setenv("ACCEPT_DEVICE", std::to_string(sel.gpu).c_str(), 1);
-  make_gpu_current(sel.gpu);
+  if (const std::string err = make_gpu_current(sel.gpu); !err.empty()) {
+    std::fprintf(stderr, "error: GPU %d: %s\n", sel.gpu, err.c_str());
+    return false;
+  }
+  return true;
 }
 
+// --list: one line per registered test with its metadata.
 int do_list() {
   for (const auto& m : TestRegistry::all()) {
     std::printf("%s  [%s, %s, %s, timeout=%ds]\n",
@@ -576,11 +599,7 @@ int do_exec(const Options& opt) {
     return 2;
   }
 
-  // Tests that fork before their first HIP call select gpu() themselves: a
-  // child inheriting an initialized HIP runtime cannot use it.
-  const bool forks_before_hip = meta->category == "hip/ipc" ||
-                                meta->id == "Vmm_Reclaim_Cycles_CrossProcess";
-  if (!forks_before_hip) make_gpu_current(gpu());
+  const std::string prep_err = prepare_test(*meta);
 
   LoopbackBootstrap boot;
   TestContext ctx;
@@ -592,6 +611,8 @@ int do_exec(const Options& opt) {
   TestResult result;
   if (acceptance::hipw::hip_category_unavailable(meta->category)) {
     result = skip("HIP runtime unavailable (libamdhip64.so not loaded)");
+  } else if (!prep_err.empty()) {
+    result = fail(prep_err);
   } else {
     result = acceptance::run_with_probe([&] {
       try {
@@ -751,6 +772,10 @@ std::vector<TestMeta> fill_report_selection(const Options& opt,
   in.discovery = discovery;
   in.quiet = opt.quiet;
   in.perf_csv = opt.perf_csv;
+  const std::vector<std::string> hosts = split_nodes(opt.hosts);
+  in.launch.np = opt.np;
+  in.launch.ppn = effective_ppn(opt.np, opt.ppn, hosts.size());
+  in.launch.hosts = hosts.empty() ? std::vector<std::string>{"localhost"} : hosts;
   std::vector<TestMeta> selected = select_tests(opt, exclude_two_node);
   for (const auto& m : selected) in.selected_ids.insert(m.id);
   in.class_filter = opt.filter_class;
@@ -856,6 +881,7 @@ int do_run(const Options& opt) {
   // Live per-test streaming to stderr (suppressed by --quiet); NA tests were
   // streamed at skip time, so the live stream covers every selected test.
   ropts.stream = !opt.quiet;
+  ropts.prepare = prepare_test;
   ropts.discovery = discovery;
   ropts.classifications = part.classifications;
   for (const auto& s : part.skipped_lines)
@@ -1005,7 +1031,7 @@ int do_worker(const Options& opt) {
                  opt.size);
     return 2;
   }
-  apply_selection(opt, /*worker=*/true);
+  if (!apply_selection(opt, /*worker=*/true)) return 2;
 
   // Construct bootstrap; failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
@@ -1043,6 +1069,7 @@ int do_worker(const Options& opt) {
   RunnerOptions ropts;
   ropts.isolate = opt.isolate;
   ropts.stream = !opt.quiet;
+  ropts.prepare = prepare_test;
   ropts.discovery = discovery;
   ropts.classifications = part.classifications;
   for (const auto& s : part.skipped_lines)
@@ -1340,9 +1367,6 @@ int do_launch(const Options& opt) {
   // synthesized NA set match what actually ran.
   ReportInputs in;
   fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size == 1, in);
-  in.launch.np = size;
-  in.launch.ppn = effective_ppn(opt.np, opt.ppn, hosts.size());
-  in.launch.hosts = hosts.empty() ? std::vector<std::string>{"localhost"} : hosts;
   // Placeholder envs: load_rank_results_text() replaces each with the
   // worker's @env block.
   for (const auto& c : children)
@@ -1404,7 +1428,7 @@ int run(const Options& opt) {
       // rank on another host, go through the launcher; a single local rank
       // runs in-process: worker + policy + Reporter -> report.json + gate.
       if (!opt.lint && needs_launch(opt)) return do_launch(opt);
-      if (!opt.lint) apply_selection(opt, /*worker=*/false);
+      if (!opt.lint && !apply_selection(opt, /*worker=*/false)) return 2;
       return do_run(opt);
   }
   return 0;

@@ -16,6 +16,7 @@
 #include "hip/utils/HipApi.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -30,6 +31,10 @@ namespace acceptance {
 namespace {
 
 struct AgentSearch {
+  // gpu()'s PCI address: (bus << 8) | (device << 3), function ignored (HIP
+  // does not report it), and the domain.
+  uint32_t want_bdf = 0;
+  uint32_t want_domain = 0;
   hsa_agent_t gpu;
   bool gpu_found = false;
   hsa_agent_t cpu;
@@ -41,7 +46,18 @@ hsa_status_t collect_agents(hsa_agent_t a, void* data) {
   hsa_device_type_t t{};
   if (hsa_agent_get_info(a, HSA_AGENT_INFO_DEVICE, &t) != HSA_STATUS_SUCCESS)
     return HSA_STATUS_SUCCESS;
-  if (t == HSA_DEVICE_TYPE_GPU && !s->gpu_found) { s->gpu = a; s->gpu_found = true; }
+  if (t == HSA_DEVICE_TYPE_GPU && !s->gpu_found) {
+    uint32_t bdf = 0;
+    uint32_t domain = 0;
+    if (hsa_agent_get_info(a, static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_BDFID),
+                           &bdf) == HSA_STATUS_SUCCESS &&
+        hsa_agent_get_info(a, static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_DOMAIN),
+                           &domain) == HSA_STATUS_SUCCESS &&
+        (bdf & ~7u) == s->want_bdf && domain == s->want_domain) {
+      s->gpu = a;
+      s->gpu_found = true;
+    }
+  }
   if (t == HSA_DEVICE_TYPE_CPU && !s->cpu_found) { s->cpu = a; s->cpu_found = true; }
   return HSA_STATUS_SUCCESS;
 }
@@ -87,9 +103,17 @@ ACCEPT_TEST(Hsa_MemoryPool_LockHostToPool, "hip/hsa", Topology::Single,
   if (!hip_kernels_available()) return skip("requires hiprtc");
   HIP_CHECK(hipSetDevice(gpu()));  // ensures the HSA runtime is initialized
 
+  // The HSA agent for gpu(): HSA agents are not renumbered by
+  // HIP_VISIBLE_DEVICES, so match on the PCI address.
+  int bus = 0, dev = 0, domain = 0;
+  HIP_CHECK(hipDeviceGetAttribute(&bus, hipDeviceAttributePciBusId, gpu()));
+  HIP_CHECK(hipDeviceGetAttribute(&dev, hipDeviceAttributePciDeviceId, gpu()));
+  HIP_CHECK(hipDeviceGetAttribute(&domain, hipDeviceAttributePciDomainID, gpu()));
   AgentSearch as{};
+  as.want_bdf = (static_cast<uint32_t>(bus) << 8) | (static_cast<uint32_t>(dev) << 3);
+  as.want_domain = static_cast<uint32_t>(domain);
   (void)hsa_iterate_agents(collect_agents, &as);
-  if (!as.gpu_found) return skip("no HSA GPU agent found");
+  if (!as.gpu_found) return skip("no HSA GPU agent matches GPU " + std::to_string(gpu()));
   if (!as.cpu_found) return skip("no HSA CPU agent found");
 
   // Host memory locks into a CPU/system coarse-grained pool; the GPU agent is

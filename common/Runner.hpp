@@ -17,6 +17,7 @@
 // "corrupt" Fail. Crashes (signal or non-zero exit) and timeouts are likewise
 // synthesized into Fail rows so every test yields one uniform result schema.
 
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -75,6 +76,11 @@ struct RunnerOptions {
   // stream's verdict/detail (the gate itself is still computed by the Reporter).
   // A test id absent from the map is treated as Class::Unclassified.
   std::map<std::string, Classification> classifications;
+
+  // Called before each in-process test body (e.g. to make the selected GPU
+  // current again after the previous test); a non-empty return fails the test
+  // with that reason without running it. Isolated children do their own.
+  std::function<std::string(const TestMeta&)> prepare;
 };
 
 class Runner {

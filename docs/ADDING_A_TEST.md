@@ -55,8 +55,8 @@ ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 3
 non-`hipSuccess` return, and (under `--kind perf`) records the call's latency.
 
 Pass `gpu()`, never a literal `0`, wherever a call takes a device. A test that
-`fork()`s before its first HIP call must be added to the `forks_before_hip`
-list in `do_exec` (`main.cc`), so HIP is not initialized ahead of the fork.
+`fork()`s before its first HIP call must be added to the exceptions in
+`prepare_test` (`main.cc`), so HIP is not initialized ahead of the fork.
 
 ### Verbs template
 

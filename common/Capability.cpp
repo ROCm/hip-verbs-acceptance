@@ -396,10 +396,11 @@ std::vector<GpuNicAffinity> compute_affinity(
     aff.gpu_ordinal = gpu.ordinal;
     const std::string gpu_path =
         gpu.bdf.empty() ? std::string() : sysfs_realpath("/sys/bus/pci/devices/" + gpu.bdf);
+    // Score 0 means a path did not resolve: no evidence, so no nearest NIC.
     int best = 0;
     for (const auto& ne : nic_entries) {
       const int score = pci_path_shared_depth(gpu_path, ne.path);
-      if (score > best || aff.nearest_nic.empty()) {
+      if (score > best) {
         best = score;
         aff.nearest_nic = ne.dev;
       }
@@ -408,7 +409,7 @@ std::vector<GpuNicAffinity> compute_affinity(
     // every pair looks the same): record it so selection doesn't trust it.
     int at_best = 0;
     for (const auto& ne : nic_entries)
-      if (pci_path_shared_depth(gpu_path, ne.path) == best) ++at_best;
+      if (best > 0 && pci_path_shared_depth(gpu_path, ne.path) == best) ++at_best;
     aff.ambiguous = at_best > 1;
     result.push_back(std::move(aff));
   }

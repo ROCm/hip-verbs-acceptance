@@ -312,10 +312,12 @@ GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. A
 prints it for every rank from the workers' `@env` blocks). The rank
 then `hipSetDevice()`s its GPU and publishes the pair as `ACCEPT_HCA` /
 `ACCEPT_DEVICE`, which the verbs device-open paths and the HIP tests read
-(`hca()` / `gpu()`) and the isolated `--exec` children inherit; each child
-makes `gpu()` current before the test body, except tests that `fork()` before
-their first HIP call (`hip/ipc`, `Vmm_Reclaim_Cycles_CrossProcess`), which
-select it themselves. The pair is recorded per node as `selection`.
+(`hca()` / `gpu()`) and the isolated `--exec` children inherit. `gpu()` is
+made current again before every test body, isolated or in-process, except
+tests that `fork()` before their first HIP call (`hip/ipc`,
+`Vmm_Reclaim_Cycles_CrossProcess`), which select it themselves. If that fails
+on a host with GPUs, the rank exits 2 at startup, or the test fails. The pair
+is recorded per node as `selection`.
 
 The cluster is assumed **homogeneous**, but "homogeneous" is treated as a
 *rollup, not a precondition* (per review): each node's descriptor is recorded

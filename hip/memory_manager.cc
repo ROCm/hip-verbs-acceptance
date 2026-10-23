@@ -856,7 +856,7 @@ ACCEPT_TEST(Vmm_Create_Map_Roundtrip, "hip/memmgr", Topology::Single,
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
   hipMemGenericAllocationHandle_t handle{};
   size_t size = 0;
-  std::string create_err = vmm_create_pinned(bytes, 0, &handle, &size);
+  std::string create_err = vmm_create_pinned(bytes, gpu(), &handle, &size);
   if (!create_err.empty()) return fail(create_err);
 
   // Map the retained handle at a new VA and unmap on scope exit.
@@ -889,7 +889,7 @@ ACCEPT_TEST(Vmm_SetGetAccess, "hip/memmgr", Topology::Single, Kind::Functional,
   const size_t bytes = sizeof(int) * 256;
   hipMemGenericAllocationHandle_t handle{};
   size_t size = 0;
-  std::string create_err = vmm_create_pinned(bytes, 0, &handle, &size);
+  std::string create_err = vmm_create_pinned(bytes, gpu(), &handle, &size);
   if (!create_err.empty()) return fail(create_err);
 
   VmmMapping mapping;
@@ -1045,7 +1045,7 @@ ACCEPT_TEST(Vmm_PosixFd_Export_Import, "hip/memmgr", Topology::Single,
   hipMemGenericAllocationHandle_t handle{};
   size_t size = 0;
   std::string create_err =
-      vmm_create_pinned(bytes, 0, &handle, &size, /*exportable=*/true);
+      vmm_create_pinned(bytes, gpu(), &handle, &size, /*exportable=*/true);
   if (!create_err.empty()) return fail(create_err);
 
   // The source keeps `handle` alive (own_handle=false) so the compat sub-test can
@@ -1220,7 +1220,7 @@ ACCEPT_TEST(Vmm_PosixFd_Import_D2D_Copy, "hip/memmgr", Topology::Single,
   hipMemGenericAllocationHandle_t handle{};
   size_t size = 0;
   const std::string create_err =
-      vmm_create_pinned(bytes, 0, &handle, &size, /*exportable=*/true);
+      vmm_create_pinned(bytes, gpu(), &handle, &size, /*exportable=*/true);
   if (!create_err.empty()) return fail(create_err);
 
   const PosixFdImportStyle import_style = posix_fd_import_style();
