@@ -352,7 +352,7 @@ fi
 REP_F="$TMP/rep2.json"
 LOG_F="$TMP/twonode.log"
 # 'syn2_[!h]*' excludes syn2_hang: that test is ACCEPT_SYN_HANG-gated (check
-# (n) below exercises it on its own, with the env var set) and would
+# (q) below exercises it on its own, with the env var set) and would
 # otherwise show up here as an unrelated MUST_PASS/skip gate-fail row since
 # ACCEPT_SYN_HANG is not set in this invocation.
 run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_[!h]*' --vendor synthetic \
@@ -844,7 +844,179 @@ else
 fi
 
 # ===========================================================================
-# Check (n): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
+# Check (n): --version prints a non-empty harness version and git SHA, and
+# report.json carries the same two values in a top-level "harness" object
+# (additive; schema_version "1.2").
+# ===========================================================================
+LOG_N="$TMP/version.log"
+run_bin "$LOG_N" --version
+RC_N=$RC
+
+if [ "$RC_N" -ne 0 ]; then
+  fail "--version exits 0" "exit=$RC_N"
+  cat "$LOG_N"
+elif ! grep -Eq '^hva [^ ]+ \(git [^)]+\)$' "$LOG_N"; then
+  fail "--version output format" "got: $(cat "$LOG_N")"
+else
+  pass "--version prints 'hva <version> (git <sha>)'"
+fi
+
+REP_N="$TMP/rep_version.json"
+LOG_N2="$TMP/version_report.log"
+run_bin "$LOG_N2" --vendor synthetic --policy "$POLICY/synthetic.csv" \
+    --filter 'syn_pass' --report "$REP_N"
+
+if [ ! -f "$REP_N" ]; then
+  fail "harness block in report.json" "no report written: $REP_N"
+  cat "$LOG_N2"
+else
+  "$PY" - "$REP_N" <<'PYEOF' >"$TMP/n_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+errs = []
+if rep.get("schema_version") != "1.2":
+    errs.append("schema_version=%r expected '1.2'" % rep.get("schema_version"))
+harness = rep.get("harness")
+if not isinstance(harness, dict):
+    errs.append("top-level 'harness' object missing or not a dict: %r" % harness)
+else:
+    if not harness.get("version"):
+        errs.append("harness.version missing/empty: %r" % harness.get("version"))
+    if not harness.get("git_sha"):
+        errs.append("harness.git_sha missing/empty: %r" % harness.get("git_sha"))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.2"
+  else
+    fail "harness block in report.json" "$(cat "$TMP/n_out.txt")"
+  fi
+fi
+
+# ===========================================================================
+# Check (o): --local-ranks forwards --filter-category (and --filter-class,
+# --hide-na, --gid, --device) to its spawned workers, same as --nodes already
+# does. Every registered synthetic test shares category "synthetic", so this
+# build cannot show --filter-category actually EXCLUDING a test (there is no
+# second category to exclude); what this check CAN and does prove is that the
+# flag is accepted and parsed cleanly by both execv'd workers (before this
+# change, do_local_ranks silently dropped it, so a worker never saw it and
+# could not fail on it either) and that the 2-rank reconciliation still
+# produces the exact same result as the equivalent run without the flag
+# (check (f)) -- i.e. forwarding it is not a no-op path that happens to also
+# not break anything.
+# ===========================================================================
+REP_O="$TMP/rep2_cat.json"
+LOG_O="$TMP/twonode_cat.log"
+run_bin "$LOG_O" --local-ranks 2 --filter 'syn2_*' --filter-category synthetic \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_O"
+RC_O=$RC
+
+if [ ! -f "$REP_O" ]; then
+  fail "2-rank --filter-category forwarding" "no report written: $REP_O"
+  cat "$LOG_O"
+else
+  "$PY" - "$REP_O" "$RC_O" <<'PYEOF' >"$TMP/o_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+rc = int(sys.argv[2])
+errs = []
+tests = {t["id"]: t for t in rep.get("tests", [])}
+
+def need(tid):
+    t = tests.get(tid)
+    if t is None:
+        errs.append("missing test row: %s" % tid)
+    return t
+
+t = need("syn2_barrier")
+if t is not None and t.get("status") != "pass":
+    errs.append("syn2_barrier status=%r expected pass" % t.get("status"))
+
+t = need("syn2_r0fail_r1pass")
+if t is not None:
+    if t.get("status") != "fail":
+        errs.append("syn2_r0fail_r1pass status=%r expected fail" % t.get("status"))
+    rf = t.get("reduced_from", {})
+    if rf.get("0") != "fail" or rf.get("1") != "pass":
+        errs.append("syn2_r0fail_r1pass reduced_from=%r expected {0:fail,1:pass} "
+                    "(a worker failed to parse --filter-category?)" % rf)
+
+if rc != 1:
+    errs.append("2-rank gate exit=%d expected 1 (syn2_r0fail_r1pass fails)" % rc)
+
+ranks = sorted(n.get("rank") for n in rep.get("nodes", []))
+if ranks != [0, 1]:
+    errs.append("nodes[] ranks=%r expected [0, 1] "
+                "(--filter-category reached both workers)" % ranks)
+
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--local-ranks 2 --filter-category synthetic: flag reaches both workers, reconciliation unchanged"
+  else
+    fail "2-rank --filter-category forwarding" "$(cat "$TMP/o_out.txt")"
+    cat "$LOG_O"
+  fi
+fi
+
+# ===========================================================================
+# Check (p): --filter-class narrows the REPORT as well as the run. Regression:
+# the reporter used to keep every --filter/--kind-selected test, so each
+# MUST_PASS test that --filter-class kept from running was reported as "no
+# result produced by any rank (structural failure)". Single-node --filter-class
+# na must report only syn_na and pass; --local-ranks 2 --filter 'syn2_*'
+# --filter-class na must report nothing and pass; both must be filtered=true.
+# ===========================================================================
+REP_P1="$TMP/rep_fc_na.json"
+LOG_P1="$TMP/fc_na.log"
+run_bin "$LOG_P1" --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P1"
+RC_P1=$RC
+REP_P2="$TMP/rep2_fc_na.json"
+LOG_P2="$TMP/twonode_fc_na.log"
+run_bin "$LOG_P2" --local-ranks 2 --filter 'syn2_*' --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P2"
+RC_P2=$RC
+
+if [ ! -f "$REP_P1" ] || [ ! -f "$REP_P2" ]; then
+  fail "--filter-class report selection" "no report written: $REP_P1 / $REP_P2"
+  cat "$LOG_P1" "$LOG_P2"
+else
+  "$PY" - "$REP_P1" "$RC_P1" "$REP_P2" "$RC_P2" <<'PYEOF' >"$TMP/p_out.txt" 2>&1
+import json, sys
+errs = []
+for path, rc, want, label in ((sys.argv[1], int(sys.argv[2]), ["syn_na"], "single-node"),
+                              (sys.argv[3], int(sys.argv[4]), [], "--local-ranks 2")):
+    with open(path) as f:
+        rep = json.load(f)
+    ids = sorted(t["id"] for t in rep.get("tests", []))
+    if ids != want:
+        errs.append("%s: tests=%r expected %r" % (label, ids, want))
+    if rep.get("filtered") is not True:
+        errs.append("%s: filtered=%r expected true" % (label, rep.get("filtered")))
+    if rc != 0:
+        errs.append("%s: gate exit=%d expected 0" % (label, rc))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--filter-class na: report holds only NA tests (single-node and --local-ranks 2), filtered=true, gate PASS"
+  else
+    fail "--filter-class report selection" "$(cat "$TMP/p_out.txt")"
+    cat "$LOG_P1" "$LOG_P2"
+  fi
+fi
+
+# ===========================================================================
+# Check (q): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
 # makes both --local-ranks workers spin forever in-process (a TwoNode test
 # has no per-test timeout, see Runner::run_in_process). --launch-timeout 3
 # gives each worker --deadline-sec 13 (launch_timeout+10); its own watchdog
@@ -855,11 +1027,11 @@ fi
 # worktree's binary path (not a bare 'hva --worker') because other agents run
 # their own hva builds concurrently on this host.
 # ===========================================================================
-LOG_N="$TMP/hang.log"
+LOG_Q="$TMP/hang.log"
 timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang \
     --launch-timeout 3 --vendor synthetic --policy "$POLICY/synthetic.csv" \
-    >"$LOG_N" 2>&1
-RC_N=$?
+    >"$LOG_Q" 2>&1
+RC_Q=$?
 
 # Scoped stray-process check. do_local_ranks execv's "/proc/self/exe" with
 # that LITERAL string as argv[0] (so the worker's cmdline does NOT contain
@@ -879,16 +1051,16 @@ stray_workers() {
   printf '%s\n' "$out" | xargs -n1 2>/dev/null
 }
 
-if [ "$RC_N" -eq 124 ]; then
+if [ "$RC_Q" -eq 124 ]; then
   fail "worker deadline watchdog" \
        "run HUNG (timeout tripped at 30s); watchdog did not fire"
-  cat "$LOG_N"
+  cat "$LOG_Q"
   # Best-effort: do not leave the hang running for the rest of the suite.
   STRAY="$(stray_workers)"
   [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
-elif [ "$RC_N" -ne 4 ]; then
-  fail "worker deadline watchdog" "exit=$RC_N expected 4 (abnormal worker exit)"
-  cat "$LOG_N"
+elif [ "$RC_Q" -ne 4 ]; then
+  fail "worker deadline watchdog" "exit=$RC_Q expected 4 (abnormal worker exit)"
+  cat "$LOG_Q"
   STRAY="$(stray_workers)"
   [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
 else
@@ -908,7 +1080,7 @@ else
 fi
 
 # ===========================================================================
-# Check (o): SIGTERM to a launcher-spawned worker also kills its active
+# Check (r): SIGTERM to a launcher-spawned worker also kills its active
 # isolated test. syn_spawn_grandchild_hang runs isolated, in its own process
 # group, and forks a grandchild that writes its pid to ACCEPT_GC_PIDFILE. Once
 # that file exists, SIGTERM the worker (what --local-ranks sends on Ctrl-C).
@@ -918,100 +1090,100 @@ fi
 # fixture's own 2s timeout is the race to beat: the pidfile appears in
 # milliseconds.
 # ===========================================================================
-O_PIDFILE="$TMP/o_gc.pid"
-LOG_O="$TMP/o.log"
-rm -f "$O_PIDFILE"
-ACCEPT_GC_PIDFILE="$O_PIDFILE" "$BIN" --worker --rank 0 --size 1 \
-    --results-out "$TMP/o_results.kv" --filter syn_spawn_grandchild_hang \
+R_PIDFILE="$TMP/r_gc.pid"
+LOG_R="$TMP/r.log"
+rm -f "$R_PIDFILE"
+ACCEPT_GC_PIDFILE="$R_PIDFILE" "$BIN" --worker --rank 0 --size 1 \
+    --results-out "$TMP/r_results.kv" --filter syn_spawn_grandchild_hang \
     --isolate all --deadline-sec 60 --vendor synthetic \
-    --policy "$POLICY/synthetic.csv" >"$LOG_O" 2>&1 &
+    --policy "$POLICY/synthetic.csv" >"$LOG_R" 2>&1 &
 W_PID=$!
-for _ in $(seq 1 50); do [ -s "$O_PIDFILE" ] && break; sleep 0.02; done
-O_CHILD="$(pgrep -P "$W_PID" 2>/dev/null | head -n1)"
-O_GC="$(head -n1 "$O_PIDFILE" 2>/dev/null | tr -dc '0-9')"
+for _ in $(seq 1 50); do [ -s "$R_PIDFILE" ] && break; sleep 0.02; done
+R_CHILD="$(pgrep -P "$W_PID" 2>/dev/null | head -n1)"
+R_GC="$(head -n1 "$R_PIDFILE" 2>/dev/null | tr -dc '0-9')"
 kill -TERM "$W_PID" 2>/dev/null
 wait "$W_PID" 2>/dev/null
-O_ALIVE=""
+R_ALIVE=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  O_ALIVE=""
-  for p in $O_CHILD $O_GC; do kill -0 "$p" 2>/dev/null && O_ALIVE="$O_ALIVE $p"; done
-  [ -z "$O_ALIVE" ] && break
+  R_ALIVE=""
+  for p in $R_CHILD $R_GC; do kill -0 "$p" 2>/dev/null && R_ALIVE="$R_ALIVE $p"; done
+  [ -z "$R_ALIVE" ] && break
   sleep 0.2
 done
-if [ -z "$O_CHILD" ] || [ -z "$O_GC" ]; then
+if [ -z "$R_CHILD" ] || [ -z "$R_GC" ]; then
   fail "worker SIGTERM kills isolated test" \
-       "setup: isolated child '$O_CHILD' / grandchild '$O_GC' not seen before SIGTERM"
-  cat "$LOG_O"
-  [ -n "$O_GC" ] && kill -9 "$O_GC" 2>/dev/null
-elif [ -n "$O_ALIVE" ]; then
-  fail "worker SIGTERM kills isolated test" "still alive after worker SIGTERM:$O_ALIVE"
-  kill -9 $O_ALIVE 2>/dev/null
+       "setup: isolated child '$R_CHILD' / grandchild '$R_GC' not seen before SIGTERM"
+  cat "$LOG_R"
+  [ -n "$R_GC" ] && kill -9 "$R_GC" 2>/dev/null
+elif [ -n "$R_ALIVE" ]; then
+  fail "worker SIGTERM kills isolated test" "still alive after worker SIGTERM:$R_ALIVE"
+  kill -9 $R_ALIVE 2>/dev/null
 else
-  pass "worker SIGTERM kills isolated test (child $O_CHILD and grandchild $O_GC are dead)"
+  pass "worker SIGTERM kills isolated test (child $R_CHILD and grandchild $R_GC are dead)"
 fi
 
 # ===========================================================================
-# Check (p): Ctrl-C on a --local-ranks launcher takes its workers down. Both
+# Check (s): Ctrl-C on a --local-ranks launcher takes its workers down. Both
 # workers hang in syn2_hang, in their own process groups (outside the
 # terminal's foreground group), so only the launcher's handler can reach
 # them. SIGINT the launcher once both workers exist; all three must be gone.
 # ===========================================================================
 ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang --vendor synthetic \
-    --policy "$POLICY/synthetic.csv" >"$TMP/p.log" 2>&1 &
-P_LAUNCHER=$!
-P_WORKERS=""
+    --policy "$POLICY/synthetic.csv" >"$TMP/s.log" 2>&1 &
+S_LAUNCHER=$!
+S_WORKERS=""
 for _ in $(seq 1 100); do
-  P_WORKERS="$(pgrep -P "$P_LAUNCHER" 2>/dev/null | xargs)"
-  [ "$(echo "$P_WORKERS" | wc -w)" -eq 2 ] && break
+  S_WORKERS="$(pgrep -P "$S_LAUNCHER" 2>/dev/null | xargs)"
+  [ "$(echo "$S_WORKERS" | wc -w)" -eq 2 ] && break
   sleep 0.05
 done
-kill -INT "$P_LAUNCHER" 2>/dev/null
-wait "$P_LAUNCHER" 2>/dev/null
-P_ALIVE=""
+kill -INT "$S_LAUNCHER" 2>/dev/null
+wait "$S_LAUNCHER" 2>/dev/null
+S_ALIVE=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  P_ALIVE=""
-  for p in $P_WORKERS; do kill -0 "$p" 2>/dev/null && P_ALIVE="$P_ALIVE $p"; done
-  [ -z "$P_ALIVE" ] && break
+  S_ALIVE=""
+  for p in $S_WORKERS; do kill -0 "$p" 2>/dev/null && S_ALIVE="$S_ALIVE $p"; done
+  [ -z "$S_ALIVE" ] && break
   sleep 0.2
 done
-if [ "$(echo "$P_WORKERS" | wc -w)" -ne 2 ]; then
-  fail "--local-ranks Ctrl-C cleanup" "setup: workers '$P_WORKERS' not seen"
-  cat "$TMP/p.log"
-  [ -n "$P_WORKERS" ] && kill -9 $P_WORKERS 2>/dev/null
-elif [ -n "$P_ALIVE" ]; then
-  fail "--local-ranks Ctrl-C cleanup" "workers still alive after SIGINT:$P_ALIVE"
-  kill -9 $P_ALIVE 2>/dev/null
+if [ "$(echo "$S_WORKERS" | wc -w)" -ne 2 ]; then
+  fail "--local-ranks Ctrl-C cleanup" "setup: workers '$S_WORKERS' not seen"
+  cat "$TMP/s.log"
+  [ -n "$S_WORKERS" ] && kill -9 $S_WORKERS 2>/dev/null
+elif [ -n "$S_ALIVE" ]; then
+  fail "--local-ranks Ctrl-C cleanup" "workers still alive after SIGINT:$S_ALIVE"
+  kill -9 $S_ALIVE 2>/dev/null
 else
-  pass "--local-ranks Ctrl-C cleanup (workers $P_WORKERS are gone)"
+  pass "--local-ranks Ctrl-C cleanup (workers $S_WORKERS are gone)"
 fi
 
 # ===========================================================================
-# Check (q): the deadline kill does not wait on a stalled stderr. The worker's
+# Check (t): the deadline kill does not wait on a stalled stderr. The worker's
 # stderr is a FIFO whose reader never reads, pre-filled so any write blocks.
 # Rank 1 retries connecting to a closed rendezvous port; --deadline-sec 1
 # must still end it in about a second. Before the fix, the watchdog's
 # fprintf blocked and the worker ran until the outer `timeout`.
 # ===========================================================================
-Q_FIFO="$TMP/q.fifo"
-mkfifo "$Q_FIFO"
-sleep 30 <"$Q_FIFO" &
-Q_READER=$!
-exec 3>"$Q_FIFO"
+T_FIFO="$TMP/t.fifo"
+mkfifo "$T_FIFO"
+sleep 30 <"$T_FIFO" &
+T_READER=$!
+exec 3>"$T_FIFO"
 head -c 65536 /dev/zero >&3
-Q_T0=$(date +%s)
+T_T0=$(date +%s)
 timeout 15 "$BIN" --worker --rank 1 --size 2 --rendezvous 127.0.0.1:1 \
-    --results-out "$TMP/q.kv" --deadline-sec 1 --filter syn2_barrier \
+    --results-out "$TMP/t.kv" --deadline-sec 1 --filter syn2_barrier \
     --vendor synthetic 2>&3
-RC_Q=$?
-Q_ELAPSED=$(( $(date +%s) - Q_T0 ))
+RC_T=$?
+T_ELAPSED=$(( $(date +%s) - T_T0 ))
 exec 3>&-
-kill "$Q_READER" 2>/dev/null
-wait "$Q_READER" 2>/dev/null
-if [ "$RC_Q" -eq 124 ] || [ "$Q_ELAPSED" -gt 5 ]; then
+kill "$T_READER" 2>/dev/null
+wait "$T_READER" 2>/dev/null
+if [ "$RC_T" -eq 124 ] || [ "$T_ELAPSED" -gt 5 ]; then
   fail "deadline kill with stalled stderr" \
-       "exit=$RC_Q after ${Q_ELAPSED}s (watchdog blocked on stderr?)"
+       "exit=$RC_T after ${T_ELAPSED}s (watchdog blocked on stderr?)"
 else
-  pass "deadline kill with stalled stderr (exit $RC_Q after ${Q_ELAPSED}s)"
+  pass "deadline kill with stalled stderr (exit $RC_T after ${T_ELAPSED}s)"
 fi
 
 # ---------------------------------------------------------------------------

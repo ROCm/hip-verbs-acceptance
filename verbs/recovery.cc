@@ -746,8 +746,22 @@ ACCEPT_TEST(vat_ionic_sq_sig_all, "verbs/recovery", Topology::Single,
     if (list) ibvw::safe_free_device_list(list);
     return skip("no RDMA devices present on this host");
   }
-  struct ibv_context* dctx = ibv_open_device(list[0]);
-  const char* dn = ibv_get_device_name(list[0]);
+  // Honor --device (ACCEPT_IB_DEVICE) like RcConn::open() does, else the first
+  // enumerated device.
+  int idx = 0;
+  if (const char* want = std::getenv("ACCEPT_IB_DEVICE"); want != nullptr && *want != '\0') {
+    idx = -1;
+    for (int i = 0; i < num; ++i) {
+      const char* name = ibv_get_device_name(list[i]);
+      if (name != nullptr && want == std::string(name)) { idx = i; break; }
+    }
+    if (idx < 0) {
+      ibvw::safe_free_device_list(list);
+      return fail("IB device '" + std::string(want) + "' not found");
+    }
+  }
+  struct ibv_context* dctx = ibv_open_device(list[idx]);
+  const char* dn = ibv_get_device_name(list[idx]);
   std::string dev_name = dn ? dn : "<unknown>";
   ibvw::safe_free_device_list(list);
   if (!dctx)

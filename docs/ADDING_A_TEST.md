@@ -63,7 +63,7 @@ ACCEPT_TEST(vat_my_feature, "verbs/foundation", Topology::Single, Kind::Function
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_pd* pd = ibv_alloc_pd(d.ctx);

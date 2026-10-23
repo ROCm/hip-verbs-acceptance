@@ -39,8 +39,12 @@ Vmm_Map_NoDeadlock_KernelInFlight,KNOWN_FAILURE,,fail,ROCM-25387,hipMemMap deadl
 | `NA` | permanently not applicable on this hardware | (n/a, reported as na) | neutral | ok |
 | `KNOWN_FAILURE` | tracked bug | reproduced -> **still fails** (fix pressure) | - | unexpected pass -> **fails**, flagged "possibly fixed" |
 
-A test not listed in the policy is `UNCLASSIFIED`: it runs, is flagged, and is
-gate-neutral. Discovery mode (no policy file) treats every test as `MUST_PASS`.
+A registered test that is not listed in the (present) policy is **not run at
+all** (`classify_and_partition` silently excludes it — the policy is the
+authoritative run list, there is no `UNCLASSIFIED` class and no gate-neutral
+"ran but doesn't count" outcome); use `--lint` to find tests missing from the
+policy. Discovery mode (no policy file at all) is different: it treats every
+test as `MUST_PASS` and runs all of them.
 
 `KNOWN_FAILURE` always surfaces as `FAIL` by design to keep the bug
 visible; the gate goes green only once the bug is fixed (reclassify to `MUST_PASS`)
@@ -49,8 +53,17 @@ or the behavior becomes permanent (reclassify to `NA`).
 ### when (optional)
 
 Gates the row on the runtime environment. Multiple terms join with `;` (AND). If
-`when` does not match, the row is skipped and the next matching row (or the
-unlisted/`UNCLASSIFIED` fallback) applies.
+`when` does not match, the next row for that test id (by declaration order) is
+tried. If no row's `when` matches but at least one row exists for the test id,
+the test is **not run**. Its class is synthesized from the first row's `when`,
+not copied from that row's class: `SKIP` when every term of that predicate is
+software-gated (`rocm`, `driver`, `fw`, `sym:`, `!sym:`), and `NA` otherwise
+(e.g. a `gpu` term). The first row's ticket and reason are kept; an empty
+reason becomes "no predicate matched (environment does not satisfy any when
+clause)". `when_matched` is left unset. So `test_x,MUST_PASS,rocm>=7.1,,,` on a
+ROCm 7.0 host reports `skip`, not a `MUST_PASS` failure. Add a catch-all row
+(empty `when`) to choose the class explicitly. Only a test id with **no row at
+all** (no exact match, no matching glob) is unlisted and not run (see above).
 
 | term | true when |
 |---|---|

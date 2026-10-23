@@ -43,6 +43,8 @@
 #include "common/SshLauncher.hpp"
 #include "common/Perf.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Version.hpp"
+#include "common/version_info.hpp"
 #include "wrapper/hip/api_wrapper.hpp"
 #ifdef ACCEPT_HAVE_IBVERBS
 #include "wrapper/verbs/ibv_api_wrapper.hpp"
@@ -64,8 +66,6 @@ namespace {
 // waitpid_eintr / sleep_ms / monotonic_ms live in common/PosixUtil.hpp (shared).
 using namespace posix_util;
 
-constexpr const char* kVersion = "hva 0.1.0-phase1";
-
 // Default --forward-env list: forwarded to ssh workers unless
 // --no-forward-env is given or --forward-env overrides it. HSA_* and
 // ACCEPT_* are prefix matches (trailing '*'); everything else is an exact
@@ -73,7 +73,6 @@ constexpr const char* kVersion = "hva 0.1.0-phase1";
 constexpr const char* kDefaultForwardEnv =
     "LD_LIBRARY_PATH,ROCM_PATH,PATH,HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,"
     "HSA_*,ACCEPT_*";
-
 enum class Mode { None, Help, Version, List, Exec, Run, Worker, LocalRanks, Nodes };
 
 struct Options {
@@ -135,7 +134,7 @@ struct Options {
 
 void print_usage(std::FILE* out) {
   std::fprintf(out,
-    "hva " "0.1.0-phase1" " — HIP/Verbs acceptance harness\n"
+    "hva %s — HIP/Verbs acceptance harness\n"
     "\n"
     "Usage:\n"
     "  hva --list\n"
@@ -224,7 +223,8 @@ void print_usage(std::FILE* out) {
     "                        running. Omit when invoking --worker by hand; a\n"
     "                        worker started this way behaves exactly as before\n"
     "                        this flag existed. Older --remote-binary builds\n"
-    "                        predate this flag and will reject it (exit 2).\n");
+    "                        predate this flag and will reject it (exit 2).\n",
+    kHarnessVersion);
 }
 
 // Fetch the value for a flag that requires an argument. Advances `i`.
@@ -649,7 +649,9 @@ std::vector<TestMeta> fill_report_selection(const Options& opt,
   in.perf_csv = opt.perf_csv;
   std::vector<TestMeta> selected = select_tests(opt, exclude_two_node);
   for (const auto& m : selected) in.selected_ids.insert(m.id);
-  in.filtered = selected.size() != eligible_count(exclude_two_node);
+  in.class_filter = opt.filter_class;
+  in.filtered = selected.size() != eligible_count(exclude_two_node) ||
+                !opt.filter_class.empty();
   return selected;
 }
 
@@ -1129,6 +1131,18 @@ int do_local_ranks(const Options& opt) {
       if (!opt.vendor.empty())  { args.push_back("--vendor");  args.push_back(opt.vendor); }
       if (!opt.policy.empty())  { args.push_back("--policy");  args.push_back(opt.policy); }
       if (opt.isolate_explicit) { args.push_back("--isolate"); args.push_back(opt.isolate); }
+      // Forwarded for parity with --nodes' RemoteCommandParams (do_nodes). For
+      // --gid/--device this is belt-and-suspenders: the launcher already
+      // setenv()s ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE before spawning (see
+      // run()), and execv() below inherits that environment, so those two were
+      // already effectively forwarded; passing them as flags too keeps the
+      // --local-ranks and --nodes code paths visibly symmetric and doesn't
+      // change behavior (same value either way).
+      if (!opt.filter_class.empty())    { args.push_back("--filter-class");    args.push_back(opt.filter_class); }
+      if (!opt.filter_category.empty()) { args.push_back("--filter-category"); args.push_back(opt.filter_category); }
+      if (opt.hide_na)                  { args.push_back("--hide-na"); }
+      if (!opt.gid.empty())             { args.push_back("--gid");    args.push_back(opt.gid); }
+      if (!opt.device.empty())          { args.push_back("--device"); args.push_back(opt.device); }
       std::vector<char*> cargv;
       cargv.reserve(args.size() + 1);
       for (auto& a : args) cargv.push_back(a.data());
@@ -1377,8 +1391,12 @@ int do_nodes(const Options& opt) {
     }
     if (c.timed_out) {
       std::fprintf(stderr,
-                   "error: rank %d on %s did not complete within %lds — killed "
-                   "(possible unreachable node / rendezvous hang)\n",
+                   "error: rank %d on %s did not complete within the overall "
+                   "%lds --launch-timeout for this run — killed (possible "
+                   "unreachable node / rendezvous hang; this deadline covers "
+                   "the whole ssh launch + run, not a single connection "
+                   "attempt — pass a larger --launch-timeout to allow more "
+                   "time)\n",
                    c.rank, c.node.c_str(), opt.launch_timeout);
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
@@ -1434,7 +1452,7 @@ int run(const Options& opt) {
       return 0;
 
     case Mode::Version:
-      std::printf("%s\n", kVersion);
+      std::printf("hva %s (git %s)\n", kHarnessVersion, kGitSha);
       return 0;
 
     case Mode::List:
