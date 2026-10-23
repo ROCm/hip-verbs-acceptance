@@ -303,14 +303,17 @@ Each rank resolves one GPU (HIP ordinal) and one RDMA device (HCA):
 | neither | the local rank (GPU 0 if not visible) | as for `--device` only |
 
 Both flags take one value or one per local rank; the launcher passes each
-worker its own entry plus `--local-rank`. "Nearest" is the GPU-NIC affinity
-from the PCIe BDF walk; a tie (`ambiguous`) or no affinity falls back to the
+worker its own entry plus `--local-rank`. "Nearest" is the NIC whose sysfs
+PCIe path shares the deepest ancestor with the GPU's (same switch beats same
+root port); a tie (`ambiguous`) or no affinity falls back to the
 first ACTIVE NIC with a `note` — never an error. HIP ordinals are mapped to KFD
 GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. The rank
 then `hipSetDevice()`s its GPU and publishes the pair as `ACCEPT_HCA` /
 `ACCEPT_DEVICE`, which the verbs device-open paths and the HIP tests read
-(`hca()` / `gpu()`) and the isolated `--exec` children inherit. The pair is
-recorded per node as `selection`.
+(`hca()` / `gpu()`) and the isolated `--exec` children inherit; each child
+makes `gpu()` current before the test body, except tests that `fork()` before
+their first HIP call (`hip/ipc`, `Vmm_Reclaim_Cycles_CrossProcess`), which
+select it themselves. The pair is recorded per node as `selection`.
 
 The cluster is assumed **homogeneous**, but "homogeneous" is treated as a
 *rollup, not a precondition* (per review): each node's descriptor is recorded
