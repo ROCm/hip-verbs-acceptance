@@ -352,7 +352,7 @@ fi
 REP_F="$TMP/rep2.json"
 LOG_F="$TMP/twonode.log"
 # 'syn2_[!h]*' excludes syn2_hang: that test is ACCEPT_SYN_HANG-gated (check
-# (l) below exercises it on its own, with the env var set) and would
+# (n) below exercises it on its own, with the env var set) and would
 # otherwise show up here as an unrelated MUST_PASS/skip gate-fail row since
 # ACCEPT_SYN_HANG is not set in this invocation.
 run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_[!h]*' --vendor synthetic \
@@ -725,7 +725,126 @@ PYEOF
 fi
 
 # ===========================================================================
-# Check (l): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
+# Check (l): srun launcher end-to-end. No real Slurm is
+# available on this box, so this fakes `srun` with a tiny wrapper script placed
+# first in PATH: it parses/ignores srun's own flags up to the program argv and
+# execs the remainder (`/bin/sh -c "<cmd>"`) locally. Combined with a fake
+# SLURM_JOB_ID (the only other thing --remote-launcher srun validates besides
+# --ssh-user), this drives the SAME 2-rank TwoNode path as check (f), but
+# through build_srun_argv / the srun exec path in SshLauncher.cpp instead of
+# ssh — proving the launcher dispatch, the srun argv shape, and the
+# launcher-naming in do_nodes's messages all work end-to-end.
+# ===========================================================================
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$FAKEBIN"
+cat >"$FAKEBIN/srun" <<'SRUNEOF'
+#!/bin/sh
+# Fake srun: parse/ignore srun's own flags up to the program argv, then exec
+# the remainder locally. Mirrors build_srun_argv's argv shape:
+#   srun --nodes=1 --ntasks=1 --nodelist=<n> --overlap --export=ALL --quiet \
+#        --kill-on-bad-exit=1 /bin/sh -c "<cmd>"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --nodes=*|--ntasks=*|--nodelist=*|--overlap|--export=ALL|--quiet|--kill-on-bad-exit=*)
+      shift ;;
+    /bin/sh)
+      shift; break ;;
+    *)
+      echo "fake-srun: unexpected arg before /bin/sh: $1" >&2
+      exit 99 ;;
+  esac
+done
+exec /bin/sh "$@"
+SRUNEOF
+chmod +x "$FAKEBIN/srun"
+
+REP_L="$TMP/rep_srun.json"
+LOG_L="$TMP/srun.log"
+PATH="$FAKEBIN:$PATH" SLURM_JOB_ID=999999 \
+  run_bin "$LOG_L" --nodes localhost,localhost --remote-launcher srun \
+          --filter 'syn2_*' --vendor synthetic --policy "$POLICY/synthetic.csv" \
+          --report "$REP_L"
+RC_L=$RC
+
+if [ ! -f "$REP_L" ]; then
+  fail "srun launcher end-to-end" "no report written: $REP_L"
+  cat "$LOG_L"
+elif ! grep -q 'launching 2 rank(s) over srun' "$LOG_L"; then
+  fail "srun launcher end-to-end" "launcher banner did not name srun"
+  cat "$LOG_L"
+else
+  "$PY" - "$REP_L" "$RC_L" <<'PYEOF' >"$TMP/l_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+rc = int(sys.argv[2])
+errs = []
+tests = {t["id"]: t for t in rep.get("tests", [])}
+
+def need(tid):
+    t = tests.get(tid)
+    if t is None:
+        errs.append("missing test row: %s" % tid)
+    return t
+
+t = need("syn2_barrier")
+if t is not None and t.get("status") != "pass":
+    errs.append("syn2_barrier status=%r expected pass (cross-process exchange "
+                "over the srun-launched rank failed)" % t.get("status"))
+
+t = need("syn2_r0fail_r1pass")
+if t is not None and t.get("status") != "fail":
+    errs.append("syn2_r0fail_r1pass status=%r expected fail" % t.get("status"))
+
+ranks = sorted(n.get("rank") for n in rep.get("nodes", []))
+if ranks != [0, 1]:
+    errs.append("nodes[] ranks=%r expected [0, 1]" % ranks)
+
+if rc != 1:
+    errs.append("srun 2-rank gate exit=%d expected 1 (syn2_r0fail_r1pass fails)" % rc)
+
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "srun launcher end-to-end (fake srun on PATH, SLURM_JOB_ID set, 2-rank TwoNode path, gate FAIL exit 1)"
+  else
+    fail "srun launcher end-to-end" "$(cat "$TMP/l_out.txt")"
+    cat "$LOG_L"
+  fi
+fi
+
+# ===========================================================================
+# Check (m): --remote-launcher validation errors all exit 2: unknown
+# value, srun combined with --ssh-user, srun outside a Slurm allocation, and
+# srun combined with --forward-env / --no-forward-env (SLURM_JOB_ID set, so
+# the forward-env rejection is what fires).
+# ===========================================================================
+V1_OUT=$("$BIN" --nodes localhost --remote-launcher bogus 2>&1 >/dev/null)
+RC_V1=$?
+V2_OUT=$("$BIN" --nodes localhost --remote-launcher srun --ssh-user foo 2>&1 >/dev/null)
+RC_V2=$?
+V3_OUT=$(env -u SLURM_JOB_ID "$BIN" --nodes localhost --remote-launcher srun 2>&1 >/dev/null)
+RC_V3=$?
+V4_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --forward-env ROCM_PATH 2>&1 >/dev/null)
+RC_V4=$?
+V5_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --no-forward-env 2>&1 >/dev/null)
+RC_V5=$?
+
+if [ "$RC_V1" -eq 2 ] && [ "$RC_V2" -eq 2 ] && [ "$RC_V3" -eq 2 ] &&
+   [ "$RC_V4" -eq 2 ] && [ "$RC_V5" -eq 2 ] &&
+   echo "$V4_OUT" | grep -q -- '--forward-env' &&
+   echo "$V5_OUT" | grep -q -- '--forward-env'; then
+  pass "--remote-launcher validation errors (unknown value / srun+--ssh-user / srun without SLURM_JOB_ID / srun+--forward-env / srun+--no-forward-env) all exit 2"
+else
+  fail "--remote-launcher validation errors" \
+       "exit codes: unknown=$RC_V1 (want 2) ssh-user=$RC_V2 (want 2) no-slurm=$RC_V3 (want 2) forward-env=$RC_V4 (want 2) no-forward-env=$RC_V5 (want 2)"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$V1_OUT" "$V2_OUT" "$V3_OUT" "$V4_OUT" "$V5_OUT"
+fi
+
+# ===========================================================================
+# Check (n): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
 # makes both --local-ranks workers spin forever in-process (a TwoNode test
 # has no per-test timeout, see Runner::run_in_process). --launch-timeout 3
 # gives each worker --deadline-sec 13 (launch_timeout+10); its own watchdog
@@ -736,11 +855,11 @@ fi
 # worktree's binary path (not a bare 'hva --worker') because other agents run
 # their own hva builds concurrently on this host.
 # ===========================================================================
-LOG_L="$TMP/hang.log"
+LOG_N="$TMP/hang.log"
 timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang \
     --launch-timeout 3 --vendor synthetic --policy "$POLICY/synthetic.csv" \
-    >"$LOG_L" 2>&1
-RC_L=$?
+    >"$LOG_N" 2>&1
+RC_N=$?
 
 # Scoped stray-process check. do_local_ranks execv's "/proc/self/exe" with
 # that LITERAL string as argv[0] (so the worker's cmdline does NOT contain
@@ -760,16 +879,16 @@ stray_workers() {
   printf '%s\n' "$out" | xargs -n1 2>/dev/null
 }
 
-if [ "$RC_L" -eq 124 ]; then
+if [ "$RC_N" -eq 124 ]; then
   fail "worker deadline watchdog" \
        "run HUNG (timeout tripped at 30s); watchdog did not fire"
-  cat "$LOG_L"
+  cat "$LOG_N"
   # Best-effort: do not leave the hang running for the rest of the suite.
   STRAY="$(stray_workers)"
   [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
-elif [ "$RC_L" -ne 4 ]; then
-  fail "worker deadline watchdog" "exit=$RC_L expected 4 (abnormal worker exit)"
-  cat "$LOG_L"
+elif [ "$RC_N" -ne 4 ]; then
+  fail "worker deadline watchdog" "exit=$RC_N expected 4 (abnormal worker exit)"
+  cat "$LOG_N"
   STRAY="$(stray_workers)"
   [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
 else

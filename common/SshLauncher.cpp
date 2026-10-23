@@ -8,9 +8,11 @@
 
 #include "common/PosixUtil.hpp"
 
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <sstream>
 #include <string>
 
@@ -88,7 +90,25 @@ std::string build_remote_command(const RemoteCommandParams& p, int rank, int siz
   // run by the REMOTE shell via ssh, so an unquoted path/host/vendor containing a
   // space or shell metacharacter would break parsing or allow injection. rank and
   // size are integers we format ourselves, so they need no quoting.
-  std::string cmd = shell_single_quote(remote_binary);
+  //
+  // Forwarded environment: prefix the command with
+  // `env 'K1=V1' 'K2=V2' ... ` so the ssh child process (and anything it
+  // execs) sees these variables, instead of whatever the remote login shell
+  // sets up. Each "NAME=value" pair is single-quoted as ONE token, so a value
+  // containing spaces, quotes, or even embedded newlines survives intact
+  // (single quotes are the only POSIX quoting that preserves a literal
+  // newline). p.env is empty unless the caller (do_nodes) explicitly resolved
+  // --forward-env against the launcher's environment, so an empty list
+  // reproduces the command used before env forwarding byte-for-byte.
+  std::string cmd;
+  if (!p.env.empty()) {
+    cmd += "env";
+    for (const auto& kv : p.env) {
+      cmd += " " + shell_single_quote(kv.first + "=" + kv.second);
+    }
+    cmd += " ";
+  }
+  cmd += shell_single_quote(remote_binary);
   cmd += " --worker";
   cmd += " --rank " + std::to_string(rank);
   cmd += " --size " + std::to_string(size);
@@ -135,6 +155,57 @@ std::vector<std::string> split_nodes(const std::string& csv) {
   return out;
 }
 
+std::vector<std::string> parse_forward_env_spec(const std::string& csv) {
+  // Same comma-split + trim + drop-empty rules as split_nodes, so
+  // "--forward-env ''" and "--forward-env 'A,,B'" behave exactly like the
+  // equivalent --nodes spec would: zero / two entries, never an error.
+  return split_nodes(csv);
+}
+
+bool is_valid_forward_env_pattern(const std::string& pattern) {
+  if (pattern.empty()) return false;
+  std::string ident = pattern;
+  if (ident.back() == '*') ident.pop_back();
+  // Reject a bare "*" (empty prefix): forwarding "everything currently set"
+  // is not an allowed pattern -- the set stays explicit.
+  if (ident.empty()) return false;
+  const unsigned char first = static_cast<unsigned char>(ident.front());
+  if (!(std::isalpha(first) || first == '_')) return false;
+  for (const char c : ident) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (!(std::isalnum(uc) || c == '_')) return false;
+  }
+  return true;
+}
+
+bool forward_env_pattern_matches(const std::string& pattern,
+                                 const std::string& name) {
+  if (!pattern.empty() && pattern.back() == '*') {
+    const std::string prefix = pattern.substr(0, pattern.size() - 1);
+    return name.compare(0, prefix.size(), prefix) == 0;
+  }
+  return pattern == name;
+}
+
+std::vector<std::pair<std::string, std::string>> select_forward_env(
+    const std::vector<std::pair<std::string, std::string>>& environment,
+    const std::vector<std::string>& patterns) {
+  // std::map<name, value> both sorts by name and de-duplicates: a variable
+  // that matches more than one pattern (explicit name + overlapping prefix,
+  // or two overlapping prefixes) is still inserted once.
+  std::map<std::string, std::string> matched;
+  for (const auto& kv : environment) {
+    for (const auto& pat : patterns) {
+      if (forward_env_pattern_matches(pat, kv.first)) {
+        matched.emplace(kv.first, kv.second);
+        break;  // already selected; no need to test the remaining patterns
+      }
+    }
+  }
+  return std::vector<std::pair<std::string, std::string>>(matched.begin(),
+                                                           matched.end());
+}
+
 std::vector<std::string> build_ssh_argv(const SshRank& r,
                                         const SshLaunchOptions& opts) {
   // ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no
@@ -162,6 +233,53 @@ std::vector<std::string> build_ssh_argv(const SshRank& r,
   argv.push_back(r.node);
   argv.push_back(r.remote_command);
   return argv;
+}
+
+std::vector<std::string> build_srun_argv(const SshRank& r,
+                                         const SshLaunchOptions& opts) {
+  // srun --nodes=1 --ntasks=1 --nodelist=<node> --overlap --export=ALL --quiet
+  //      --kill-on-bad-exit=1 /bin/sh -c "<remote_command>"
+  //
+  //  --nodes=1 --ntasks=1 --nodelist=<node> : exactly one task, pinned to this
+  //                     rank's allocated node (rank 0's own node included —
+  //                     there is no local-node special case).
+  //  --overlap        : share the allocation with the batch/interactive step
+  //                     that is already running on these nodes (Slurm >= 20.11).
+  //                     Without it, a second srun step can block waiting for
+  //                     resources the first step already holds.
+  //  --export=ALL     : the task inherits the launcher's environment
+  //                     (LD_LIBRARY_PATH, ROCM_PATH, ...) even if the enclosing
+  //                     job set SLURM_EXPORT_ENV=NONE.
+  //  --quiet          : suppress srun's own step-launch banner (keeps stdout
+  //                     limited to the worker's --results-out - block).
+  //  --kill-on-bad-exit=1 : if the task exits nonzero, don't leave siblings
+  //                     running (mirrors the launcher's bounded-wait contract).
+  // The remote command is ONE argv element, exactly as with ssh; srun hands it
+  // to /bin/sh -c on the target node, which then parses it as a normal shell
+  // command line (single-quoted sub-tokens and all).
+  (void)opts;  // srun ignores ssh_user/connect_timeout (ssh-only knobs)
+  std::vector<std::string> argv;
+  argv.push_back("srun");
+  argv.push_back("--nodes=1");
+  argv.push_back("--ntasks=1");
+  argv.push_back("--nodelist=" + r.node);
+  argv.push_back("--overlap");
+  argv.push_back("--export=ALL");
+  argv.push_back("--quiet");
+  argv.push_back("--kill-on-bad-exit=1");
+  argv.push_back("/bin/sh");
+  argv.push_back("-c");
+  argv.push_back(r.remote_command);
+  return argv;
+}
+
+std::vector<std::string> build_launch_argv(const SshRank& r,
+                                           const SshLaunchOptions& opts) {
+  switch (opts.launcher) {
+    case RemoteLauncher::Srun: return build_srun_argv(r, opts);
+    case RemoteLauncher::Ssh:
+    default:                   return build_ssh_argv(r, opts);
+  }
 }
 
 std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
@@ -216,16 +334,17 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
       const int devnull = ::open("/dev/null", O_RDONLY);
       if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
 
-      const std::vector<std::string> argv = build_ssh_argv(ranks[i], opts);
+      const std::vector<std::string> argv = build_launch_argv(ranks[i], opts);
       std::vector<char*> cargv;
       cargv.reserve(argv.size() + 1);
       // execvp does not modify argv, but the signature wants char* const*.
       for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
       cargv.push_back(nullptr);
-      ::execvp("ssh", cargv.data());
-      // exec failed — emit a diagnostic on the (redirected) stderr and exit 127.
-      const char* msg = "hva: failed to exec ssh\n";
-      (void)!::write(STDERR_FILENO, msg, std::strlen(msg));
+      ::execvp(argv[0].c_str(), cargv.data());
+      // exec failed — emit a diagnostic naming the selected launcher on the
+      // (redirected) stderr and exit 127.
+      const std::string msg = "hva: failed to exec " + argv[0] + "\n";
+      (void)!::write(STDERR_FILENO, msg.c_str(), msg.size());
       ::_exit(127);
     }
 

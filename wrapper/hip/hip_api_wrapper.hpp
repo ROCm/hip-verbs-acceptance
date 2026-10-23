@@ -426,5 +426,14 @@ bool hip_api_init();
 
 void hip_api_fini();
 
+// The dlopen handle for libamdhip64.so (valid only after a successful
+// hip_api_init(); nullptr otherwise). Exposed as a function, not a direct
+// extern on hip_lib_info, because every hip_lib_ops_t member name (including
+// a hypothetical `handle` look-alike) is shadowed by the HIPW_HIP_OP(...)
+// object-like macros above once this header is included -- callers outside
+// this TU need dlinfo()/dladdr() on the loaded library (e.g. to locate its
+// ROCm install root), not the ops table itself.
+void* hip_dlopen_handle();
+
 }  // namespace hipw
 }  // namespace acceptance

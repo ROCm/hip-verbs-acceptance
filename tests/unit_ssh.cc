@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: MIT
  ************************************************************************/
 
-// unit_ssh — unit tests for the ssh/CLI builders + quoting that the --nodes
-// launcher relies on (common/SshLauncher.*). Covers shell_single_quote,
+// unit_ssh — unit tests for the ssh/srun/CLI builders + quoting that the
+// --nodes launcher relies on (common/SshLauncher.*). Covers shell_single_quote,
 // build_ssh_argv, build_remote_command (incl. --policy made ABSOLUTE & quoted
-// and --filter single-quoted so a glob can't be expanded), and split_nodes.
+// and --filter single-quoted so a glob can't be expanded), build_launch_argv's
+// ssh/srun dispatch, and split_nodes.
 
 #include <algorithm>
 #include <string>
@@ -196,6 +197,58 @@ void test_build_remote_command() {
   }
 }
 
+void test_build_launch_argv() {
+  SshRank r;
+  r.rank = 1;
+  r.node = "host2";
+  r.remote_command = "the remote command --filter 'x*'";
+
+  // Ssh (default): build_launch_argv must be IDENTICAL to build_ssh_argv —
+  // no regression for the existing default launcher.
+  {
+    SshLaunchOptions o;
+    o.launcher = RemoteLauncher::Ssh;
+    o.ssh_user = "testuser";
+    o.connect_timeout = 9;
+    const std::vector<std::string> dispatched = build_launch_argv(r, o);
+    const std::vector<std::string> direct = build_ssh_argv(r, o);
+    CHECK(dispatched == direct,
+          "build_launch_argv(Ssh) == build_ssh_argv (no regression)");
+  }
+
+  // Srun: argv shape matches the plan's srun invocation.
+  {
+    SshLaunchOptions o;
+    o.launcher = RemoteLauncher::Srun;
+    const std::vector<std::string> a = build_launch_argv(r, o);
+    CHECK(!a.empty() && a[0] == "srun", "srun argv[0] == 'srun'");
+    CHECK(has_arg(a, "--nodelist=host2"), "srun argv has --nodelist=<node>");
+    CHECK(has_arg(a, "--ntasks=1"), "srun argv has --ntasks=1");
+    CHECK(has_arg(a, "--nodes=1"), "srun argv has --nodes=1");
+    CHECK(has_arg(a, "--overlap"), "srun argv has --overlap");
+    CHECK(has_arg(a, "--export=ALL"), "srun argv has --export=ALL");
+    CHECK(has_arg(a, "--kill-on-bad-exit=1"),
+          "srun argv has --kill-on-bad-exit=1");
+    // Ends with /bin/sh, -c, <remote_command> as one element (same contract
+    // as ssh: the remote command is never split/re-quoted on the way out).
+    CHECK(a.size() >= 3 &&
+              a[a.size() - 3] == "/bin/sh" &&
+              a[a.size() - 2] == "-c" &&
+              a.back() == r.remote_command,
+          "srun argv ends with /bin/sh, -c, <remote_command> as one element");
+    // No ssh-only options leak into the srun argv.
+    CHECK(!has_arg(a, "-n"), "srun argv has no ssh -n");
+    CHECK(!has_arg(a, "-l"), "srun argv has no ssh -l");
+    CHECK(index_of(a, "BatchMode=yes") < 0,
+          "srun argv has no ssh BatchMode option");
+    CHECK(index_of(a, "StrictHostKeyChecking=no") < 0,
+          "srun argv has no ssh StrictHostKeyChecking option");
+    for (const auto& e : a)
+      CHECK(e.find("ConnectTimeout=") == std::string::npos,
+            "srun argv has no ssh ConnectTimeout option");
+  }
+}
+
 void test_split_nodes() {
   {
     const std::vector<std::string> v = split_nodes("a,b");
@@ -223,12 +276,144 @@ void test_split_nodes() {
   }
 }
 
+void test_build_remote_command_env_forwarding() {
+  RemoteCommandParams p;
+  p.kind = "func";
+
+  // Empty env (the default/zero value) -> command identical to before env forwarding:
+  // no "env" prefix at all.
+  {
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(cmd.rfind("'/abs/hva'", 0) == 0,
+          "empty env: command starts with the binary, no env prefix");
+    CHECK(!contains(cmd, "env '"), "empty env: no 'env ...' prefix at all");
+  }
+
+  // Two vars -> "env 'A=1' 'B=x y' " immediately precedes the binary, in the
+  // order given (do_nodes is responsible for sorting before calling in).
+  {
+    p.env = {{"A", "1"}, {"B", "x y"}};
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(cmd.rfind("env 'A=1' 'B=x y' '/abs/hva'", 0) == 0,
+          "two vars: command starts with env 'A=1' 'B=x y' '<binary>'");
+  }
+
+  // A value containing a single quote is escaped the canonical POSIX way,
+  // and a value containing an embedded newline survives literally (single
+  // quotes are the one POSIX quoting form that preserves it).
+  {
+    p.env = {{"Q", "a'b"}, {"N", "line1\nline2"}};
+    const std::string cmd =
+        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    CHECK(contains(cmd, "'Q=a'\\''b'"),
+          "env value with an embedded quote is escaped correctly");
+    CHECK(contains(cmd, "'N=line1\nline2'"),
+          "env value with an embedded newline is preserved literally");
+  }
+}
+
+void test_forward_env_pattern_matches() {
+  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_IB_DEVICE"),
+        "ACCEPT_* matches ACCEPT_IB_DEVICE");
+  CHECK(!forward_env_pattern_matches("ACCEPT_*", "ACCEPTX"),
+        "ACCEPT_* does not match ACCEPTX (no '_' boundary)");
+  CHECK(forward_env_pattern_matches("PATH", "PATH"),
+        "bare name matches itself exactly");
+  CHECK(!forward_env_pattern_matches("PATH", "PATH2"),
+        "bare name does not prefix-match");
+  CHECK(forward_env_pattern_matches("HSA_*", "HSA_"),
+        "prefix pattern matches the prefix itself (empty suffix)");
+}
+
+void test_is_valid_forward_env_pattern() {
+  CHECK(is_valid_forward_env_pattern("PATH"), "PATH is valid");
+  CHECK(is_valid_forward_env_pattern("_FOO"), "leading underscore is valid");
+  CHECK(is_valid_forward_env_pattern("ACCEPT_*"),
+        "identifier with trailing '*' is valid");
+  CHECK(!is_valid_forward_env_pattern("1BAD"),
+        "name starting with a digit is rejected");
+  CHECK(!is_valid_forward_env_pattern("A-B"),
+        "name containing '-' is rejected");
+  CHECK(!is_valid_forward_env_pattern("*"),
+        "bare '*' (empty prefix) is rejected");
+  CHECK(!is_valid_forward_env_pattern(""), "empty pattern is rejected");
+  CHECK(!is_valid_forward_env_pattern("A*B"),
+        "'*' only valid as the trailing character");
+}
+
+void test_select_forward_env() {
+  const std::vector<std::pair<std::string, std::string>> env = {
+      {"ZZZ", "last"},
+      {"PATH", "/bin:/usr/bin"},
+      {"HSA_OVERRIDE_GFX_VERSION", "11.0.0"},
+      {"UNRELATED", "nope"},
+  };
+
+  // Only variables that are actually set AND match a pattern are forwarded;
+  // output is sorted by name regardless of input/pattern order.
+  {
+    const auto sel = select_forward_env(env, {"PATH", "HSA_*"});
+    CHECK(sel.size() == 2, "select: PATH + HSA_* -> 2 entries");
+    CHECK(sel.size() == 2 && sel[0].first == "HSA_OVERRIDE_GFX_VERSION" &&
+              sel[1].first == "PATH",
+          "select: sorted by name (HSA_* before PATH)");
+  }
+
+  // A name that matches BOTH an explicit entry and a prefix pattern is
+  // forwarded exactly once (duplicate pattern coverage, not duplicate var).
+  {
+    const auto sel =
+        select_forward_env(env, {"HSA_OVERRIDE_GFX_VERSION", "HSA_*"});
+    CHECK(sel.size() == 1, "select: overlapping explicit+prefix -> 1 entry");
+    CHECK(sel.size() == 1 && sel[0].first == "HSA_OVERRIDE_GFX_VERSION" &&
+              sel[0].second == "11.0.0",
+          "select: de-duplicated entry keeps the right value");
+  }
+
+  // A pattern matching nothing set in the environment yields nothing (not
+  // an error at this layer -- validation happens on the pattern itself).
+  {
+    const auto sel = select_forward_env(env, {"NOT_SET_ANYWHERE"});
+    CHECK(sel.empty(), "select: pattern matching no set var -> empty");
+  }
+
+  // Empty pattern list -> nothing forwarded (mirrors --no-forward-env /
+  // --forward-env '').
+  {
+    const auto sel = select_forward_env(env, {});
+    CHECK(sel.empty(), "select: empty pattern list -> empty");
+  }
+}
+
+void test_parse_forward_env_spec() {
+  CHECK(parse_forward_env_spec("").empty(),
+        "parse_forward_env_spec(''): no entries (nothing forwarded)");
+  {
+    const auto v = parse_forward_env_spec("A,,B");
+    CHECK(v.size() == 2 && v[0] == "A" && v[1] == "B",
+          "parse_forward_env_spec: drops the empty middle entry");
+  }
+  {
+    const auto v = parse_forward_env_spec(" A_* , B ");
+    CHECK(v.size() == 2 && v[0] == "A_*" && v[1] == "B",
+          "parse_forward_env_spec: trims surrounding whitespace");
+  }
+}
+
 }  // namespace
 
 void run_ssh_tests() {
   test_shell_single_quote();
   test_build_ssh_argv();
   test_build_remote_command();
+  test_build_remote_command_env_forwarding();
+  test_forward_env_pattern_matches();
+  test_is_valid_forward_env_pattern();
+  test_select_forward_env();
+  test_parse_forward_env_spec();
+  test_build_launch_argv();
   test_split_nodes();
 }
 
