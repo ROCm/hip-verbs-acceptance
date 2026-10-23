@@ -41,7 +41,7 @@ receives `ctx` (rank/size/bootstrap) and returns `pass()`, `fail("reason")`, or
 // in hip/<category>.cc, inside namespace acceptance, guarded by ACCEPT_HAVE_HIP
 ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));  // this rank's GPU (--device / local rank)
 
   DeviceBuffer buf;
   HIP_CHECK(buf.allocate(4096));

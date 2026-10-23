@@ -24,8 +24,8 @@ cmake --build build -j
 | Goal | Command |
 |---|---|
 | HIP tests (1 node) | `./build/hva --filter-category 'hip/*' --kind func --report report.json` |
-| Verbs tests (2 ranks, 1 host) | `./build/hva --local-ranks 2 --filter-category 'verbs/*' --kind func --report report.json` |
-| Verbs tests (2 real nodes) | `./build/hva --nodes h1,h2 --filter-category 'verbs/*' --kind func --report report.json` |
+| Verbs tests (2 ranks, 1 host) | `./build/hva -n 2 --filter-category 'verbs/*' --kind func --report report.json` |
+| Verbs tests (2 real nodes) | `./build/hva -n 2 -hosts h1,h2 --filter-category 'verbs/*' --kind func --report report.json` |
 | With perf metrics | add `--kind perf` (or `--kind all`) |
 | Gate against a policy | add `--vendor <name> --policy policy/<name>.csv` |
 | New platform (no policy) | omit `--policy`/`--vendor` -> discovery mode (see [../../../docs/NEW_PLATFORM.md](../../../docs/NEW_PLATFORM.md)) |
@@ -37,7 +37,7 @@ cmake --build build -j
 ## Notes
 
 - Exit codes: `0` gate pass, `1` gate fail, `2` usage error, `4` launch failure.
-- `--nodes` needs the binary and `--policy` dir at the same absolute path on both
+- `-hosts` needs the binary and `--policy` dir at the same absolute path on both
   nodes (shared FS); under Slurm, allocate two nodes and pass their hostnames.
 - Harness-only smoke (no GPU/NIC): `./build/hva --vendor synthetic
   --policy policy/synthetic.csv --filter 'syn_*' --report report.json` (exits 1 on
