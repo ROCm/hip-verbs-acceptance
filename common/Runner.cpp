@@ -6,6 +6,7 @@
 
 #include "common/Runner.hpp"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -18,6 +19,9 @@
 #include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -43,6 +47,19 @@ namespace {
 
 // waitpid_eintr / sleep_ms live in common/PosixUtil.hpp (shared).
 using namespace posix_util;
+
+// pid (== process group) of the isolated child run_isolated() is waiting on,
+// or 0. Read by kill_active_isolated_test(), including from signal handlers.
+std::atomic<pid_t> g_active_isolated_pid{0};
+static_assert(std::atomic<pid_t>::is_always_lock_free);
+
+// Clears g_active_isolated_pid when run_isolated() returns, on every path.
+struct ActiveIsolatedPid {
+  explicit ActiveIsolatedPid(pid_t pid) { g_active_isolated_pid.store(pid); }
+  ~ActiveIsolatedPid() { g_active_isolated_pid.store(0); }
+  ActiveIsolatedPid(const ActiveIsolatedPid&) = delete;
+  ActiveIsolatedPid& operator=(const ActiveIsolatedPid&) = delete;
+};
 
 // Human-readable signal name (best effort, portable subset).
 std::string signal_name(int sig) {
@@ -178,6 +195,7 @@ TestResult Runner::run_isolated(const TestMeta& meta) const {
   const std::string result_path = tmpl;
   ::close(fd);  // child reopens by path; we only needed a unique name
 
+  const pid_t parent = ::getpid();
   const pid_t pid = ::fork();
   if (pid < 0) {
     if (!result_path.empty()) ::unlink(result_path.c_str());
@@ -187,6 +205,13 @@ TestResult Runner::run_isolated(const TestMeta& meta) const {
   if (pid == 0) {
     // Process group so kill(-pid) reaches grandchildren on timeout.
     ::setpgid(0, 0);
+#ifdef __linux__
+    // Die with this process. If it is killed (worker deadline, launcher
+    // signal, OOM), nothing else would enforce this child's timeout.
+    // Survives the execv below.
+    ::prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (::getppid() != parent) ::_exit(127);  // parent died before prctl
+#endif
     // Re-exec self in EXEC mode. /proc/self/exe is the running binary.
     // TEST HOOK: syn_corrupt_result needs an exit-0 child that nonetheless
     // leaves a corrupt result file. We set ACCEPT_SYN_CORRUPT=1 in the child
@@ -216,6 +241,7 @@ TestResult Runner::run_isolated(const TestMeta& meta) const {
   }
 
   ::setpgid(pid, pid);  // parent-side race close; errors ignored
+  const ActiveIsolatedPid active(pid);
 
   const long timeout_ms =
       static_cast<long>(meta.timeout_sec) * 1000L;
@@ -427,6 +453,11 @@ std::vector<TestResult> Runner::run(const std::vector<TestMeta>& tests) const {
   }
 
   return out;
+}
+
+void kill_active_isolated_test(int sig) {
+  const pid_t pid = g_active_isolated_pid.load();
+  if (pid > 0) ::kill(-pid, sig);
 }
 
 }  // namespace acceptance

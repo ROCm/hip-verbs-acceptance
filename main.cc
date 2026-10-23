@@ -816,12 +816,12 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
 // distinct from whatever group it inherited (the launcher's, or a
 // --local-ranks parent's terminal foreground group). That lets the watchdog
 // reach this worker with a single kill(-getpgrp()) without also hitting the
-// launcher or sibling workers. It does NOT reach a currently-running
-// isolated --exec test child: Runner::run_isolated() has that child call
-// setpgid(0,0) itself, landing it in ITS OWN separate group (so the
-// existing per-test timeout's kill(-child_pid) stays correctly scoped to
-// just that child+grandchildren). This watchdog is a backstop for
-// everything else that per-test timeout cannot reach — most importantly a
+// launcher or sibling workers. A currently-running isolated --exec test
+// child is in ITS OWN group (Runner::run_isolated() has it call
+// setpgid(0,0), so the per-test timeout's kill(-child_pid) stays scoped to
+// that child and its descendants), so the watchdog and on_worker_signal
+// kill that group first, via kill_active_isolated_test(). This watchdog is a
+// backstop for everything the per-test timeout cannot reach — most importantly a
 // TwoNode test, which runs in-process on the worker's own thread with no
 // per-test timeout at all (Runner::run_in_process has none), so a peer that
 // never arrives/responds can otherwise block this thread forever.
@@ -831,6 +831,15 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
 // async-signal-safe — no fprintf, no std::thread, nothing that touches
 // locks). A thread has none of those constraints, so the deadline check and
 // the diagnostic print are ordinary code.
+//
+// SIGTERM/SIGINT for a launcher-spawned worker (the --local-ranks launcher
+// sends SIGTERM on Ctrl-C): kill the active isolated test's group, then this
+// worker's. Only async-signal-safe calls.
+void on_worker_signal(int) {
+  kill_active_isolated_test(SIGKILL);
+  ::kill(-::getpgrp(), SIGKILL);
+}
+
 void arm_worker_deadline(long deadline_sec) {
   // Under ssh the worker is already its own session (and so process-group)
   // leader; setpgid() on a session leader always fails with EPERM, and the
@@ -841,6 +850,14 @@ void arm_worker_deadline(long deadline_sec) {
                  "armed; kill(-getpgrp()) may reach a wider group than "
                  "intended on expiry)\n",
                  std::strerror(errno));
+  }
+  {
+    struct sigaction sa {};
+    sa.sa_handler = on_worker_signal;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    ::sigaction(SIGINT, &sa, nullptr);
+    ::sigaction(SIGTERM, &sa, nullptr);
   }
   std::thread([deadline_sec]() {
     const auto deadline =
@@ -857,6 +874,7 @@ void arm_worker_deadline(long deadline_sec) {
                  "in); killing this worker's process group\n",
                  deadline_sec);
     std::fflush(stderr);
+    kill_active_isolated_test(SIGKILL);
     ::kill(-::getpgrp(), SIGKILL);
   }).detach();
 }
@@ -1010,13 +1028,15 @@ volatile pid_t g_local_rank_pid1 = 0;
 
 void on_local_ranks_signal(int sig) {
   // Negative pid == "the process group led by this pid". Each worker leads
-  // its own group (setpgid(0,0) in arm_worker_deadline), so this reaches the
-  // worker and anything still sharing its group -- the same scope the
-  // worker's own watchdog uses for kill(-getpgrp()).
+  // its own group (setpgid(0,0) in arm_worker_deadline). SIGTERM, not
+  // SIGKILL: the worker's on_worker_signal then kills its active isolated
+  // test's group (which this group does not include) before its own. A
+  // worker that has not installed that handler yet has no isolated test, and
+  // the default SIGTERM action ends it.
   const pid_t p0 = g_local_rank_pid0;
   const pid_t p1 = g_local_rank_pid1;
-  if (p0 > 0) ::kill(-p0, SIGKILL);
-  if (p1 > 0) ::kill(-p1, SIGKILL);
+  if (p0 > 0) ::kill(-p0, SIGTERM);
+  if (p1 > 0) ::kill(-p1, SIGTERM);
   ::_exit(128 + sig);
 }
 

@@ -916,7 +916,10 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   worker the launcher spawns (`--nodes` ssh, `--local-ranks`) now gets a
   `--deadline-sec` (`launch_timeout + 10`) and arms a watchdog thread at
   startup: `setpgid(0,0)` so it leads its own process group, then on expiry
-  it logs one line and `kill(-getpgrp(), SIGKILL)`s itself. This is what
+  it logs one line, kills the group of the isolated `--exec` test it is
+  waiting on (that child leads its own group), and `kill(-getpgrp(),
+  SIGKILL)`s itself. SIGTERM/SIGINT to the worker do the same, and an
+  isolated child also dies with its worker (`PR_SET_PDEATHSIG`). This is what
   bounds a TwoNode test blocked forever on a peer that never
   arrives/responds (`Runner::run_in_process` has no per-test timeout, unlike
   the isolated `--exec` path) and what stops a worker from outliving a
@@ -924,7 +927,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   `--deadline-sec`) is unaffected. *Still open:* exiting promptly the moment
   the rendezvous socket to the peer closes, rather than waiting for the
   deadline — `SocketBootstrap` does not expose its fd for a background
-  monitor, and reading it from two threads is own its own a bigger change
+  monitor, and reading it from two threads is on its own a bigger change
   than this fix warrants; see the pull request description for the full rationale.
   Older `--remote-binary` builds predate `--deadline-sec` and reject it
   (exit 2) — they must be rebuilt from this branch or later.

@@ -907,6 +907,49 @@ else
   fi
 fi
 
+# ===========================================================================
+# Check (o): SIGTERM to a launcher-spawned worker also kills its active
+# isolated test. syn_spawn_grandchild_hang runs isolated, in its own process
+# group, and forks a grandchild that writes its pid to ACCEPT_GC_PIDFILE. Once
+# that file exists, SIGTERM the worker (what --local-ranks sends on Ctrl-C).
+# The worker, its isolated child and the grandchild must all be gone; before
+# the fix the child's group outlived the worker. --deadline-sec 60 arms the
+# worker's handlers without the deadline firing during the check. The
+# fixture's own 2s timeout is the race to beat: the pidfile appears in
+# milliseconds.
+# ===========================================================================
+O_PIDFILE="$TMP/o_gc.pid"
+LOG_O="$TMP/o.log"
+rm -f "$O_PIDFILE"
+ACCEPT_GC_PIDFILE="$O_PIDFILE" "$BIN" --worker --rank 0 --size 1 \
+    --results-out "$TMP/o_results.kv" --filter syn_spawn_grandchild_hang \
+    --isolate all --deadline-sec 60 --vendor synthetic \
+    --policy "$POLICY/synthetic.csv" >"$LOG_O" 2>&1 &
+W_PID=$!
+for _ in $(seq 1 50); do [ -s "$O_PIDFILE" ] && break; sleep 0.02; done
+O_CHILD="$(pgrep -P "$W_PID" 2>/dev/null | head -n1)"
+O_GC="$(head -n1 "$O_PIDFILE" 2>/dev/null | tr -dc '0-9')"
+kill -TERM "$W_PID" 2>/dev/null
+wait "$W_PID" 2>/dev/null
+O_ALIVE=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  O_ALIVE=""
+  for p in $O_CHILD $O_GC; do kill -0 "$p" 2>/dev/null && O_ALIVE="$O_ALIVE $p"; done
+  [ -z "$O_ALIVE" ] && break
+  sleep 0.2
+done
+if [ -z "$O_CHILD" ] || [ -z "$O_GC" ]; then
+  fail "worker SIGTERM kills isolated test" \
+       "setup: isolated child '$O_CHILD' / grandchild '$O_GC' not seen before SIGTERM"
+  cat "$LOG_O"
+  [ -n "$O_GC" ] && kill -9 "$O_GC" 2>/dev/null
+elif [ -n "$O_ALIVE" ]; then
+  fail "worker SIGTERM kills isolated test" "still alive after worker SIGTERM:$O_ALIVE"
+  kill -9 $O_ALIVE 2>/dev/null
+else
+  pass "worker SIGTERM kills isolated test (child $O_CHILD and grandchild $O_GC are dead)"
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------
