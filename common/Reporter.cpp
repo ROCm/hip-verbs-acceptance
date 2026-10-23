@@ -6,6 +6,9 @@
 
 #include "common/Reporter.hpp"
 
+#include "common/Version.hpp"
+#include "common/version_info.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
@@ -283,6 +286,9 @@ int write_report(const Policy& policy, const ReportInputs& in,
   // and are skipped entirely — they must not be synthesized into the report
   // (otherwise an excluded MUST_PASS failure would surface as `na` and silently
   // pass the gate). For a full unfiltered run selected_ids == the whole registry.
+  const bool has_class_filter = !in.class_filter.empty();
+  const Class filter_cls =
+      has_class_filter ? class_from(in.class_filter) : Class::Na;
   for (const auto& meta : TestRegistry::all()) {
     if (in.selected_ids.find(meta.id) == in.selected_ids.end()) continue;
 
@@ -290,6 +296,9 @@ int write_report(const Policy& policy, const ReportInputs& in,
     const Classification cls = policy.classify(meta.id, pred_env, &in_policy);
     // Unlisted tests are not run and do not appear in the report.
     if (!in_policy) continue;
+    // --filter-class: the worker did not run tests of another class, so they
+    // are not part of this report (not a missing result).
+    if (has_class_filter && cls.cls != filter_cls) continue;
 
     // Reduced status + per-rank inputs.
     Status reduced;
@@ -554,7 +563,11 @@ int write_report(const Policy& policy, const ReportInputs& in,
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.1") << ","
+      << "\n  \"schema_version\": " << jstr("1.2") << ","
+      << "\n  \"harness\": {"
+      << "\n    \"version\": " << jstr(kHarnessVersion) << ","
+      << "\n    \"git_sha\": "  << jstr(kGitSha)
+      << "\n  },"
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
       << "\n  \"summary\": {"

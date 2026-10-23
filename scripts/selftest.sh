@@ -839,6 +839,178 @@ else
   printf '%s\n%s\n%s\n%s\n%s\n' "$V1_OUT" "$V2_OUT" "$V3_OUT" "$V4_OUT" "$V5_OUT"
 fi
 
+# ===========================================================================
+# Check (n): --version prints a non-empty harness version and git SHA, and
+# report.json carries the same two values in a top-level "harness" object
+# (additive; schema_version "1.2").
+# ===========================================================================
+LOG_N="$TMP/version.log"
+run_bin "$LOG_N" --version
+RC_N=$RC
+
+if [ "$RC_N" -ne 0 ]; then
+  fail "--version exits 0" "exit=$RC_N"
+  cat "$LOG_N"
+elif ! grep -Eq '^hva [^ ]+ \(git [^)]+\)$' "$LOG_N"; then
+  fail "--version output format" "got: $(cat "$LOG_N")"
+else
+  pass "--version prints 'hva <version> (git <sha>)'"
+fi
+
+REP_N="$TMP/rep_version.json"
+LOG_N2="$TMP/version_report.log"
+run_bin "$LOG_N2" --vendor synthetic --policy "$POLICY/synthetic.csv" \
+    --filter 'syn_pass' --report "$REP_N"
+
+if [ ! -f "$REP_N" ]; then
+  fail "harness block in report.json" "no report written: $REP_N"
+  cat "$LOG_N2"
+else
+  "$PY" - "$REP_N" <<'PYEOF' >"$TMP/n_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+errs = []
+if rep.get("schema_version") != "1.2":
+    errs.append("schema_version=%r expected '1.2'" % rep.get("schema_version"))
+harness = rep.get("harness")
+if not isinstance(harness, dict):
+    errs.append("top-level 'harness' object missing or not a dict: %r" % harness)
+else:
+    if not harness.get("version"):
+        errs.append("harness.version missing/empty: %r" % harness.get("version"))
+    if not harness.get("git_sha"):
+        errs.append("harness.git_sha missing/empty: %r" % harness.get("git_sha"))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.2"
+  else
+    fail "harness block in report.json" "$(cat "$TMP/n_out.txt")"
+  fi
+fi
+
+# ===========================================================================
+# Check (o): --local-ranks forwards --filter-category (and --filter-class,
+# --hide-na, --gid, --device) to its spawned workers, same as --nodes already
+# does. Every registered synthetic test shares category "synthetic", so this
+# build cannot show --filter-category actually EXCLUDING a test (there is no
+# second category to exclude); what this check CAN and does prove is that the
+# flag is accepted and parsed cleanly by both execv'd workers (before this
+# change, do_local_ranks silently dropped it, so a worker never saw it and
+# could not fail on it either) and that the 2-rank reconciliation still
+# produces the exact same result as the equivalent run without the flag
+# (check (f)) -- i.e. forwarding it is not a no-op path that happens to also
+# not break anything.
+# ===========================================================================
+REP_O="$TMP/rep2_cat.json"
+LOG_O="$TMP/twonode_cat.log"
+run_bin "$LOG_O" --local-ranks 2 --filter 'syn2_*' --filter-category synthetic \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_O"
+RC_O=$RC
+
+if [ ! -f "$REP_O" ]; then
+  fail "2-rank --filter-category forwarding" "no report written: $REP_O"
+  cat "$LOG_O"
+else
+  "$PY" - "$REP_O" "$RC_O" <<'PYEOF' >"$TMP/o_out.txt" 2>&1
+import json, sys
+with open(sys.argv[1]) as f:
+    rep = json.load(f)
+rc = int(sys.argv[2])
+errs = []
+tests = {t["id"]: t for t in rep.get("tests", [])}
+
+def need(tid):
+    t = tests.get(tid)
+    if t is None:
+        errs.append("missing test row: %s" % tid)
+    return t
+
+t = need("syn2_barrier")
+if t is not None and t.get("status") != "pass":
+    errs.append("syn2_barrier status=%r expected pass" % t.get("status"))
+
+t = need("syn2_r0fail_r1pass")
+if t is not None:
+    if t.get("status") != "fail":
+        errs.append("syn2_r0fail_r1pass status=%r expected fail" % t.get("status"))
+    rf = t.get("reduced_from", {})
+    if rf.get("0") != "fail" or rf.get("1") != "pass":
+        errs.append("syn2_r0fail_r1pass reduced_from=%r expected {0:fail,1:pass} "
+                    "(a worker failed to parse --filter-category?)" % rf)
+
+if rc != 1:
+    errs.append("2-rank gate exit=%d expected 1 (syn2_r0fail_r1pass fails)" % rc)
+
+ranks = sorted(n.get("rank") for n in rep.get("nodes", []))
+if ranks != [0, 1]:
+    errs.append("nodes[] ranks=%r expected [0, 1] "
+                "(--filter-category reached both workers)" % ranks)
+
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--local-ranks 2 --filter-category synthetic: flag reaches both workers, reconciliation unchanged"
+  else
+    fail "2-rank --filter-category forwarding" "$(cat "$TMP/o_out.txt")"
+    cat "$LOG_O"
+  fi
+fi
+
+# ===========================================================================
+# Check (p): --filter-class narrows the REPORT as well as the run. Regression:
+# the reporter used to keep every --filter/--kind-selected test, so each
+# MUST_PASS test that --filter-class kept from running was reported as "no
+# result produced by any rank (structural failure)". Single-node --filter-class
+# na must report only syn_na and pass; --local-ranks 2 --filter 'syn2_*'
+# --filter-class na must report nothing and pass; both must be filtered=true.
+# ===========================================================================
+REP_P1="$TMP/rep_fc_na.json"
+LOG_P1="$TMP/fc_na.log"
+run_bin "$LOG_P1" --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P1"
+RC_P1=$RC
+REP_P2="$TMP/rep2_fc_na.json"
+LOG_P2="$TMP/twonode_fc_na.log"
+run_bin "$LOG_P2" --local-ranks 2 --filter 'syn2_*' --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P2"
+RC_P2=$RC
+
+if [ ! -f "$REP_P1" ] || [ ! -f "$REP_P2" ]; then
+  fail "--filter-class report selection" "no report written: $REP_P1 / $REP_P2"
+  cat "$LOG_P1" "$LOG_P2"
+else
+  "$PY" - "$REP_P1" "$RC_P1" "$REP_P2" "$RC_P2" <<'PYEOF' >"$TMP/p_out.txt" 2>&1
+import json, sys
+errs = []
+for path, rc, want, label in ((sys.argv[1], int(sys.argv[2]), ["syn_na"], "single-node"),
+                              (sys.argv[3], int(sys.argv[4]), [], "--local-ranks 2")):
+    with open(path) as f:
+        rep = json.load(f)
+    ids = sorted(t["id"] for t in rep.get("tests", []))
+    if ids != want:
+        errs.append("%s: tests=%r expected %r" % (label, ids, want))
+    if rep.get("filtered") is not True:
+        errs.append("%s: filtered=%r expected true" % (label, rep.get("filtered")))
+    if rc != 0:
+        errs.append("%s: gate exit=%d expected 0" % (label, rc))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--filter-class na: report holds only NA tests (single-node and --local-ranks 2), filtered=true, gate PASS"
+  else
+    fail "--filter-class report selection" "$(cat "$TMP/p_out.txt")"
+    cat "$LOG_P1" "$LOG_P2"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------

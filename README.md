@@ -26,7 +26,7 @@ minutes.
 ```bash
 cd hip-verbs-acceptance
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-      -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON -DCMAKE_PREFIX_PATH=/opt/rocm
+      -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
 cmake --build build -j
 # produces: build/hva   and   build/unit_tests
 ```
@@ -34,6 +34,10 @@ cmake --build build -j
 Drop `-DACCEPT_WITH_HIP=ON` / `-DACCEPT_WITH_IBVERBS=ON` to compile out the HIP or
 Verbs tests (e.g. on a box with no GPU or no NIC). With both off you still get the
 harness + [synthetic set](#harness-smoke-test-no-gpunic).
+
+To install a packaged copy, `cmake --install build --prefix <dir>` places the
+binary at `<dir>/bin/hva` and the policy CSVs at `<dir>/bin/policy/*.csv`,
+keeping the auto-policy lookup (`<binary_dir>/policy/...`) working out of the box.
 
 ### 2. Run the HIP tests (single node)
 
@@ -43,8 +47,10 @@ harness + [synthetic set](#harness-smoke-test-no-gpunic).
 
 ### 3. Run the Verbs tests (two ranks / two nodes)
 
-The RDMA data-path tests need two endpoints. On one host with >=2 NICs, use two
-local ranks:
+The RDMA data-path tests need two endpoints. On one host, use two local ranks.
+Both ranks open the same NIC (`--device`, else the first one with an ACTIVE
+port) and the same GPU (HIP device 0), so this is a single-NIC loopback check,
+not a NIC-to-NIC one:
 
 ```bash
 ./build/hva --local-ranks 2 --filter-category 'verbs/*' \
@@ -124,8 +130,9 @@ underlying bug. The gate is green only when nothing `MUST_PASS` fails and
 no known bug is present, so `ACCEPTANCE: FAIL` above is the tracked ROCm regression,
 not a suite defect.
 
-**Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `4` launch failure
-(ssh/srun/unreachable/timeout).
+**Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `3` I/O error
+(cannot open/write a result or report file, mkdtemp/port allocation failure),
+`4` launch failure (ssh/srun/unreachable/timeout).
 
 ---
 
@@ -141,7 +148,7 @@ not a suite defect.
 | `--policy <file>` | use a specific policy CSV directly (highest priority) |
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
-| `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
+| `--local-ranks 2` | spawn two local ranks on one NIC and GPU (loopback) and reconcile (for `verbs/*` two-node tests) |
 | `--nodes h1,h2` | launch one worker per node and reconcile |
 | `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
 | `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
@@ -269,8 +276,9 @@ Per-platform "simplified CSV" (auto-selected as `<gpu>_<nic>.csv`, e.g.
 commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 [docs/POLICY_REFERENCE.md](docs/POLICY_REFERENCE.md).
 
-- `class` in `MUST_PASS | NA | SKIP | KNOWN_FAILURE` (unlisted => `UNCLASSIFIED`,
-  flagged, gate-neutral).
+- `class` in `MUST_PASS | NA | SKIP | KNOWN_FAILURE`. A registered test with no
+  matching row is **not run at all** (silently excluded — the policy is the
+  authoritative run list); use `--lint` to find tests missing from the policy.
 - `when` (optional) gates the row on the environment: `rocm>=7.1`, `driver<6.0`,
   `gpu<2`, `sym:hipStreamGetId`, `!sym:libionic` (`;`-join = AND).
 - `expected` (`KNOWN_FAILURE` only): the expected reduced status (default `fail`).
@@ -280,15 +288,17 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact (`schema_version: "1.1"`). Top level: `mode`, `summary`
-counts, per-node `environment`, and `tests[]` with `id, category, class,
-status, reason, ticket, reduced_from, perf, gate_fail, flagged, note,
-duration_ms`. Under `--kind perf`, each test's `perf` map carries
-`<metric>.{median,min,max,avg,unit,iters,samples}`. `environment.rocm_version`
-is resolved via a priority chain (loaded HIP runtime's own tree, then
-`$ROCM_PATH`, then `hipRuntimeGetVersion()`, then `/opt/rocm`); the winning
-source is recorded in `environment.rocm_version_source` and its root in
-`environment.rocm_path`.
+The machine artifact (`schema_version: "1.2"`). Top level: `harness`
+(`{version, git_sha}` — the build-time harness version and git SHA, also
+printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
+e.g. from a source tarball), `mode`, `summary` counts, per-node `environment`,
+and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
+perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
+`perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
+`environment.rocm_version` is resolved via a priority chain (loaded HIP
+runtime's own tree, then `$ROCM_PATH`, then `hipRuntimeGetVersion()`, then
+`/opt/rocm`); the winning source is recorded in
+`environment.rocm_version_source` and its root in `environment.rocm_path`.
 
 ### Further docs
 

@@ -57,6 +57,26 @@ add_executable(hva
 target_include_directories(hva PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# Build-time version info: common/Version.hpp holds the hand-maintained
+# semantic version; generated/common/version_info.hpp holds the git SHA
+# (kGitSha), re-resolved on EVERY build (not just at configure time) by
+# cmake/GenerateVersion.cmake -- see that file for why this is a custom
+# target and not a configure_file()/execute_process() at configure time.
+set(ACCEPT_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+set(ACCEPT_VERSION_HEADER ${ACCEPT_GENERATED_DIR}/common/version_info.hpp)
+add_custom_target(generate_version ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DOUT_FILE=${ACCEPT_VERSION_HEADER}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateVersion.cmake
+  BYPRODUCTS ${ACCEPT_VERSION_HEADER}
+  COMMENT "Resolving git SHA for build-time version header"
+  VERBATIM
+)
+target_include_directories(hva PRIVATE ${ACCEPT_GENERATED_DIR})
+add_dependencies(hva generate_version)
+
 # Vendored third-party declarations are marked SYSTEM so their own warnings (e.g.
 # -Wdeprecated-enum-enum-conversion in rdma-core verbs.h) don't pollute our
 # -Wall -Wextra build. Only vendored dirs are SYSTEM; project root stays normal.
@@ -176,12 +196,20 @@ add_executable(unit_tests
 )
 target_include_directories(unit_tests PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${ACCEPT_GENERATED_DIR}
 )
 target_compile_options(unit_tests PRIVATE ${ACCEPT_WARN_FLAGS})
+add_dependencies(unit_tests generate_version)
 
 enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# install() for --nodes same-path binary assumption.
+# install() for --nodes same-path binary assumption. The policy CSVs are
+# installed next to the binary (<prefix>/bin/policy/*.csv) to match the
+# auto-policy lookup (<binary_dir>/policy/<gpu>_<nic>.csv, see
+# resolve_policy_path() in main.cc), so a packaged install works without the
+# caller also copying policy/ by hand.
 include(GNUInstallDirs)
 install(TARGETS hva RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY policy/ DESTINATION ${CMAKE_INSTALL_BINDIR}/policy
+        FILES_MATCHING PATTERN "*.csv")
