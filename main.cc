@@ -51,6 +51,11 @@
 
 #include "hip/utils/HipApi.hpp"
 
+// POSIX environ, used by --forward-env to read the launcher's own
+// environment. Not guaranteed to be declared by <unistd.h> on every libc, so
+// declare it explicitly.
+extern char** environ;
+
 namespace acceptance {
 
 namespace {
@@ -59,6 +64,14 @@ namespace {
 using namespace posix_util;
 
 constexpr const char* kVersion = "hva 0.1.0-phase1";
+
+// Default --forward-env list: forwarded to ssh workers unless
+// --no-forward-env is given or --forward-env overrides it. HSA_* and
+// ACCEPT_* are prefix matches (trailing '*'); everything else is an exact
+// variable name.
+constexpr const char* kDefaultForwardEnv =
+    "LD_LIBRARY_PATH,ROCM_PATH,PATH,HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,"
+    "HSA_*,ACCEPT_*";
 
 enum class Mode { None, Help, Version, List, Exec, Run, Worker, LocalRanks, Nodes };
 
@@ -102,6 +115,15 @@ struct Options {
   std::string remote_binary;        // --remote-binary PATH (default /proc/self/exe)
   long        launch_timeout = 120; // --launch-timeout SEC (overall deadline)
   RemoteLauncher remote_launcher = RemoteLauncher::Ssh;  // --remote-launcher ssh|srun
+
+  // Env forwarding to ssh workers. ON by default: a trailing '*' in an
+  // entry is a prefix match. NOTE: this is a deliberate behaviour change --
+  // ssh workers used to start with only the remote login environment; now
+  // they additionally inherit this list from the launcher's own environment
+  // (values actually set only). --no-forward-env restores the old behaviour.
+  std::string forward_env = kDefaultForwardEnv;  // --forward-env LIST
+  bool        forward_env_explicit = false;      // true when --forward-env was passed
+  bool        no_forward_env = false;             // --no-forward-env
 };
 
 void print_usage(std::FILE* out) {
@@ -174,6 +196,15 @@ void print_usage(std::FILE* out) {
     "                        binary AND the --policy dir must be reachable at the\n"
     "                        SAME absolute path on every node (NFS/shared FS).\n"
     "  --launch-timeout <s>  Overall launch deadline in seconds (default 120)\n"
+    "  --forward-env <list>  Comma-separated env var names forwarded from the\n"
+    "                        launcher to each ssh worker; a trailing '*' is a\n"
+    "                        prefix match (e.g. 'ACCEPT_*'). Only variables set\n"
+    "                        in the launcher's own environment are forwarded.\n"
+    "                        Default: LD_LIBRARY_PATH,ROCM_PATH,PATH,\n"
+    "                        HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,HSA_*,\n"
+    "                        ACCEPT_* (ON by default; ssh launcher only).\n"
+    "  --no-forward-env      Disable env forwarding (old ssh-login-env behaviour;\n"
+    "                        ssh launcher only)\n"
     "  --worker              Run one rank (spawned by the launcher)\n"
     "  --rank <n>            This worker's rank\n"
     "  --size <n>            Total rank count (1 or 2)\n"
@@ -339,6 +370,11 @@ int parse_args(int argc, char** argv, Options& opt) {
       if (!take_value(argc, argv, i, "--remote-binary", opt.remote_binary)) return 2;
     } else if (a == "--launch-timeout") {
       if (!take_int(argc, argv, i, "--launch-timeout", opt.launch_timeout)) return 2;
+    } else if (a == "--forward-env") {
+      if (!take_value(argc, argv, i, "--forward-env", opt.forward_env)) return 2;
+      opt.forward_env_explicit = true;
+    } else if (a == "--no-forward-env") {
+      opt.no_forward_env = true;
     } else {
       std::fprintf(stderr, "error: unknown flag '%s'\n\n", a.c_str());
       print_usage(stderr);
@@ -353,14 +389,47 @@ int parse_args(int argc, char** argv, Options& opt) {
                  "error: --nodes and --local-ranks are mutually exclusive\n");
     return 2;
   }
+
+  // --forward-env / --no-forward-env. Reject the combination outright
+  // rather than picking a silent last-flag-wins precedence: the two flags
+  // express opposite intents (forward this custom list / forward nothing),
+  // and a CLI that accepted both would make rerunning a logged command with
+  // one extra flag appended silently change behaviour.
+  if (opt.forward_env_explicit && opt.no_forward_env) {
+    std::fprintf(stderr,
+                 "error: --forward-env and --no-forward-env are mutually "
+                 "exclusive\n");
+    return 2;
+  }
+  if (!opt.no_forward_env) {
+    for (const std::string& pat : parse_forward_env_spec(opt.forward_env)) {
+      if (!is_valid_forward_env_pattern(pat)) {
+        std::fprintf(stderr,
+                     "error: --forward-env: invalid variable name '%s' "
+                     "(expected [A-Za-z_][A-Za-z0-9_]*, optionally ending in "
+                     "'*')\n",
+                     pat.c_str());
+        return 2;
+      }
+    }
+  }
   // --remote-launcher srun validation: srun has no login-user concept (it runs
   // inside an existing allocation as the submitting user) and only makes sense
-  // inside a Slurm allocation.
+  // inside a Slurm allocation. It always passes the launcher's whole
+  // environment (--export=ALL), so an explicit forward list or "forward
+  // nothing" cannot be honoured; reject them rather than silently ignore them.
   if (opt.remote_launcher == RemoteLauncher::Srun) {
     if (!opt.ssh_user.empty()) {
       std::fprintf(stderr,
                    "error: --remote-launcher srun does not accept --ssh-user "
                    "(srun has no login-user option)\n");
+      return 2;
+    }
+    if (opt.forward_env_explicit || opt.no_forward_env) {
+      std::fprintf(stderr,
+                   "error: --remote-launcher srun does not accept "
+                   "--forward-env/--no-forward-env (srun always passes the "
+                   "launcher's whole environment)\n");
       return 2;
     }
     if (std::getenv("SLURM_JOB_ID") == nullptr) {
@@ -1005,6 +1074,21 @@ std::string stderr_tail(const std::string& s) {
   return "...(truncated)...\n" + s.substr(s.size() - kMax);
 }
 
+// Snapshot of this process's own environment as name/value pairs:
+// --forward-env resolves its patterns against this, never against the
+// remote/ssh-login environment. Malformed entries (no '=', which POSIX
+// environ never actually produces) are skipped defensively.
+std::vector<std::pair<std::string, std::string>> read_process_environment() {
+  std::vector<std::pair<std::string, std::string>> out;
+  for (char** e = environ; e && *e; ++e) {
+    const std::string kv = *e;
+    const auto eq = kv.find('=');
+    if (eq == std::string::npos) continue;
+    out.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
+  }
+  return out;
+}
+
 // Human-readable name of the selected --remote-launcher, for diagnostics.
 const char* launcher_name(RemoteLauncher l) {
   return l == RemoteLauncher::Srun ? "srun" : "ssh";
@@ -1065,6 +1149,16 @@ int do_nodes(const Options& opt) {
   rcp.isolate_explicit = opt.isolate_explicit;
   rcp.gid             = opt.gid;
   rcp.device          = opt.device;
+  // --forward-env: ssh launcher only. srun passes the launcher's whole
+  // environment itself (--export=ALL), so an `env` prefix would be redundant;
+  // parse_args already rejected the explicit flags with srun.
+  if (opt.remote_launcher == RemoteLauncher::Ssh && !opt.no_forward_env) {
+    const std::vector<std::string> patterns =
+        parse_forward_env_spec(opt.forward_env);
+    if (!patterns.empty()) {
+      rcp.env = select_forward_env(read_process_environment(), patterns);
+    }
+  }
   std::vector<SshRank> specs;
   specs.reserve(nodes.size());
   for (int i = 0; i < size; ++i) {

@@ -759,6 +759,19 @@ directory — mixed HIP+verbs tests live under `verbs/`.*
 - **ABI mismatch.** Because workers run the launcher's binary path, the launcher
   must run on a host whose runtime is compatible with the target nodes; there is no
   automatic build-triple/glibc verification yet.
+- **Environment (as-built).** ssh workers do **not** otherwise share the
+  launcher's environment — they start with the remote login environment, which
+  can point at a different (or no) ROCm. `--nodes` now forwards a fixed list of
+  launcher environment variables to each worker by default
+  (`LD_LIBRARY_PATH,ROCM_PATH,PATH,HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,HSA_*,ACCEPT_*`;
+  `--forward-env` overrides the list, `--no-forward-env` disables it). This is a
+  **behaviour change**: previously, ssh workers always ran with the remote
+  login environment only. `build_remote_command` prefixes the command with
+  `env 'K=V' ...` (each pair single-quoted as one token) when the resolved list
+  is non-empty; see `common/SshLauncher.cpp`. Applies to the ssh launcher only:
+  `--remote-launcher srun` passes the caller's whole environment itself
+  (`--export=ALL`), adds no `env` prefix, and rejects `--forward-env` /
+  `--no-forward-env` (exit 2).
 - **Privileges & destructive tests (not implemented).** Link-down/`nicctl`-style
   destructive tests and an `--allow-destructive` gate are **planned, not built**
   (§13). The suite currently issues no destructive operations.
@@ -773,9 +786,14 @@ environment is auto-detected.
 
 ```
 hva                            # single-node loopback, all func tests
-hva --nodes h1,h2              # ssh multi-node launcher
+hva --nodes h1,h2              # multi-node launcher (ssh or srun)
+           [--remote-launcher ssh|srun]     # default: ssh
            [--ssh-user <name>]              # default: ~/.ssh/config / current user
            [--port <n>] [--remote-binary <path>] [--launch-timeout <sec>]
+           [--forward-env <list>] [--no-forward-env]  # default list forwards
+                                            # LD_LIBRARY_PATH,ROCM_PATH,PATH,
+                                            # HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,
+                                            # HSA_*,ACCEPT_* (ssh launcher only)
            [--kind func|perf|all]           # default: func (perf/all turn on metrics)
            [--filter '<fnmatch glob>']      # glob on test id (fnmatch), e.g. 'vat_*'
            [--filter-class <class>]         # select by policy class

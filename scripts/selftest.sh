@@ -813,7 +813,9 @@ fi
 
 # ===========================================================================
 # Check (m): --remote-launcher validation errors all exit 2: unknown
-# value, srun combined with --ssh-user, and srun outside a Slurm allocation.
+# value, srun combined with --ssh-user, srun outside a Slurm allocation, and
+# srun combined with --forward-env / --no-forward-env (SLURM_JOB_ID set, so
+# the forward-env rejection is what fires).
 # ===========================================================================
 V1_OUT=$("$BIN" --nodes localhost --remote-launcher bogus 2>&1 >/dev/null)
 RC_V1=$?
@@ -821,13 +823,20 @@ V2_OUT=$("$BIN" --nodes localhost --remote-launcher srun --ssh-user foo 2>&1 >/d
 RC_V2=$?
 V3_OUT=$(env -u SLURM_JOB_ID "$BIN" --nodes localhost --remote-launcher srun 2>&1 >/dev/null)
 RC_V3=$?
+V4_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --forward-env ROCM_PATH 2>&1 >/dev/null)
+RC_V4=$?
+V5_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --no-forward-env 2>&1 >/dev/null)
+RC_V5=$?
 
-if [ "$RC_V1" -eq 2 ] && [ "$RC_V2" -eq 2 ] && [ "$RC_V3" -eq 2 ]; then
-  pass "--remote-launcher validation errors (unknown value / srun+--ssh-user / srun without SLURM_JOB_ID) all exit 2"
+if [ "$RC_V1" -eq 2 ] && [ "$RC_V2" -eq 2 ] && [ "$RC_V3" -eq 2 ] &&
+   [ "$RC_V4" -eq 2 ] && [ "$RC_V5" -eq 2 ] &&
+   echo "$V4_OUT" | grep -q -- '--forward-env' &&
+   echo "$V5_OUT" | grep -q -- '--forward-env'; then
+  pass "--remote-launcher validation errors (unknown value / srun+--ssh-user / srun without SLURM_JOB_ID / srun+--forward-env / srun+--no-forward-env) all exit 2"
 else
   fail "--remote-launcher validation errors" \
-       "exit codes: unknown=$RC_V1 (want 2) ssh-user=$RC_V2 (want 2) no-slurm=$RC_V3 (want 2)"
-  printf '%s\n%s\n%s\n' "$V1_OUT" "$V2_OUT" "$V3_OUT"
+       "exit codes: unknown=$RC_V1 (want 2) ssh-user=$RC_V2 (want 2) no-slurm=$RC_V3 (want 2) forward-env=$RC_V4 (want 2) no-forward-env=$RC_V5 (want 2)"
+  printf '%s\n%s\n%s\n%s\n%s\n' "$V1_OUT" "$V2_OUT" "$V3_OUT" "$V4_OUT" "$V5_OUT"
 fi
 
 # ---------------------------------------------------------------------------

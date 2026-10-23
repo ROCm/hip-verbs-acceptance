@@ -59,13 +59,16 @@ path** on both, e.g. a shared FS):
 ./build/hva --nodes host1,host2 --filter-category 'verbs/*' \
       --kind func --report report.json
 #   [--remote-launcher ssh|srun] [--port P] [--remote-binary PATH] [--launch-timeout S]
-#   ssh only: [--ssh-user U]
+#   ssh only: [--ssh-user U] [--forward-env LIST] [--no-forward-env]
 ```
 
 Two launchers are available via `--remote-launcher` (default `ssh`):
 
 - **`ssh`** — the default; works anywhere passwordless ssh between the
-  allocated nodes is set up (`~/.ssh/config` or `--ssh-user`).
+  allocated nodes is set up (`~/.ssh/config` or `--ssh-user`). Each ssh worker
+  otherwise starts with only the remote login environment, not the launcher's,
+  so `--nodes` forwards a fixed set of launcher environment variables to every
+  worker; see [Env forwarding](#env-forwarding-ssh-launcher-only) below.
 - **`srun`** — use this inside a Slurm allocation where direct ssh between
   compute nodes is blocked (a common cluster policy). It requires
   `SLURM_JOB_ID` to be set (i.e. running from inside `sbatch`/`salloc`) and
@@ -74,8 +77,8 @@ Two launchers are available via `--remote-launcher` (default `ssh`):
   flag the launcher passes so the step can share the allocation with the
   batch/interactive step. Unlike ssh, srun propagates the launcher's
   environment to the worker by itself (the launcher passes `--export=ALL`, so
-  this holds even if the job set `SLURM_EXPORT_ENV=NONE`) — no separate
-  env-forwarding flag is needed for this path.
+  this holds even if the job set `SLURM_EXPORT_ENV=NONE`), so it does not
+  accept `--forward-env` / `--no-forward-env` either.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
@@ -141,11 +144,57 @@ not a suite defect.
 | `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
 | `--nodes h1,h2` | launch one worker per node and reconcile |
 | `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
+| `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
 
 Full list: `./build/hva --help`.
+
+---
+
+## Env forwarding (ssh launcher only)
+
+ssh workers do not automatically share the launcher's environment — `--nodes`
+ssh-launches each worker with its **remote login environment**, which can carry
+a different (or no) ROCm. To make the common case ("test the ROCm I have
+`LD_LIBRARY_PATH`/`ROCM_PATH` pointed at, not whatever is on the node image")
+work out of the box, `--nodes` **forwards a fixed list of variables from the
+launcher's own environment by default**:
+
+```
+LD_LIBRARY_PATH, ROCM_PATH, PATH, HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES,
+HSA_* (prefix match), ACCEPT_* (prefix match)
+```
+
+**This is a behaviour change**: before this flag existed, ssh workers always ran
+with the remote login environment only. Forwarding is now **ON by default** —
+pass `--no-forward-env` to get the old behaviour back. Only variables actually
+set in the launcher's own environment are forwarded; the default list forwards
+nothing it doesn't find set.
+
+- `--forward-env LIST` replaces the default list with a comma-separated one of
+  your own (e.g. `--forward-env 'ROCM_PATH,MY_VAR,ACCEPT_*'`); a trailing `*`
+  is a prefix match. `--forward-env ''` forwards nothing (same effect as
+  `--no-forward-env`, spelled as an explicit empty list). `--forward-env` and
+  `--no-forward-env` together are a usage error (exit 2) — they express
+  opposite intents.
+- A variable name must match `[A-Za-z_][A-Za-z0-9_]*`, optionally followed by
+  one trailing `*`; anything else is a usage error (exit 2). A bare `*` is
+  rejected (forwarding "everything" is not an allowed pattern).
+- A variable name matching more than one entry (e.g. an explicit `HSA_FOO` and
+  the `HSA_*` prefix) is still forwarded exactly once.
+- **`PATH` and `--remote-binary`:** the default `--remote-binary` is this
+  binary's own resolved `/proc/self/exe` path (always absolute), so forwarding
+  `PATH` has no effect on finding it. If you instead pass `--remote-binary` as
+  a **bare name** (no `/`) relying on a remote `$PATH` lookup, forwarding
+  `PATH` changes which `$PATH` that lookup uses — the launcher's, not the
+  node's login shell's. Prefer an absolute `--remote-binary` to avoid that
+  dependency entirely.
+- Applies to the ssh launcher only. `--remote-launcher srun` always passes the
+  launcher's whole environment (`--export=ALL`), so it adds no `env` prefix,
+  and `--forward-env` / `--no-forward-env` with srun are a usage error (exit 2)
+  rather than silently ignored.
 
 ---
 
