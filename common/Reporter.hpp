@@ -89,6 +89,12 @@ struct ReportInputs {
   // The SELECTED test ids (post --filter/--kind). The Reporter emits a row for
   // each of these and nothing else. NA synthesis is limited to this set too.
   std::set<std::string>                    selected_ids;
+  // --filter-class <class>, empty = no class filter. Applied after
+  // classification (with the predicate env), the same way the worker's
+  // classify_and_partition() applies it, so a test the class filter excluded
+  // from the run is also excluded from the report instead of being counted
+  // as a missing (structural-failure) result.
+  std::string                              class_filter;
   // true when the selection is narrower than the full registry (a partial report,
   // not a full acceptance gate). Surfaced as report.json top-level `filtered`.
   bool                                     filtered = false;

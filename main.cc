@@ -627,7 +627,9 @@ std::vector<TestMeta> fill_report_selection(const Options& opt,
   in.perf_csv = opt.perf_csv;
   std::vector<TestMeta> selected = select_tests(opt, exclude_two_node);
   for (const auto& m : selected) in.selected_ids.insert(m.id);
-  in.filtered = selected.size() != eligible_count(exclude_two_node);
+  in.class_filter = opt.filter_class;
+  in.filtered = selected.size() != eligible_count(exclude_two_node) ||
+                !opt.filter_class.empty();
   return selected;
 }
 

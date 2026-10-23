@@ -962,6 +962,55 @@ PYEOF
   fi
 fi
 
+# ===========================================================================
+# Check (p): --filter-class narrows the REPORT as well as the run. Regression:
+# the reporter used to keep every --filter/--kind-selected test, so each
+# MUST_PASS test that --filter-class kept from running was reported as "no
+# result produced by any rank (structural failure)". Single-node --filter-class
+# na must report only syn_na and pass; --local-ranks 2 --filter 'syn2_*'
+# --filter-class na must report nothing and pass; both must be filtered=true.
+# ===========================================================================
+REP_P1="$TMP/rep_fc_na.json"
+LOG_P1="$TMP/fc_na.log"
+run_bin "$LOG_P1" --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P1"
+RC_P1=$RC
+REP_P2="$TMP/rep2_fc_na.json"
+LOG_P2="$TMP/twonode_fc_na.log"
+run_bin "$LOG_P2" --local-ranks 2 --filter 'syn2_*' --filter-class na \
+        --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P2"
+RC_P2=$RC
+
+if [ ! -f "$REP_P1" ] || [ ! -f "$REP_P2" ]; then
+  fail "--filter-class report selection" "no report written: $REP_P1 / $REP_P2"
+  cat "$LOG_P1" "$LOG_P2"
+else
+  "$PY" - "$REP_P1" "$RC_P1" "$REP_P2" "$RC_P2" <<'PYEOF' >"$TMP/p_out.txt" 2>&1
+import json, sys
+errs = []
+for path, rc, want, label in ((sys.argv[1], int(sys.argv[2]), ["syn_na"], "single-node"),
+                              (sys.argv[3], int(sys.argv[4]), [], "--local-ranks 2")):
+    with open(path) as f:
+        rep = json.load(f)
+    ids = sorted(t["id"] for t in rep.get("tests", []))
+    if ids != want:
+        errs.append("%s: tests=%r expected %r" % (label, ids, want))
+    if rep.get("filtered") is not True:
+        errs.append("%s: filtered=%r expected true" % (label, rep.get("filtered")))
+    if rc != 0:
+        errs.append("%s: gate exit=%d expected 0" % (label, rc))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+sys.exit(0)
+PYEOF
+  if [ $? -eq 0 ]; then
+    pass "--filter-class na: report holds only NA tests (single-node and --local-ranks 2), filtered=true, gate PASS"
+  else
+    fail "--filter-class report selection" "$(cat "$TMP/p_out.txt")"
+    cat "$LOG_P1" "$LOG_P2"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------
