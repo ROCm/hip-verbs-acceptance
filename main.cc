@@ -867,13 +867,18 @@ void arm_worker_deadline(long deadline_sec) {
     }
     // Write the diagnostic line BEFORE killing: kill(-getpgrp(), SIGKILL)
     // below also kills THIS process (and this thread) immediately, so
-    // nothing queued after that call would ever run.
-    std::fprintf(stderr,
-                 "error: worker deadline (%lds) exceeded without the run "
-                 "completing -- the launcher gave up (or never checked back "
-                 "in); killing this worker's process group\n",
-                 deadline_sec);
-    std::fflush(stderr);
+    // nothing queued after that call would ever run. Best effort only: a
+    // stalled stderr pipe or a stuck stdio lock must not delay the kill, so
+    // write(2) (no stdio lock) runs on its own thread, and the kill goes
+    // ahead after a short wait whether or not it finished.
+    std::string msg =
+        "error: worker deadline (" + std::to_string(deadline_sec) +
+        "s) exceeded without the run completing -- the launcher gave up (or "
+        "never checked back in); killing this worker's process group\n";
+    std::thread([msg = std::move(msg)]() {
+      (void)!::write(STDERR_FILENO, msg.data(), msg.size());
+    }).detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
     kill_active_isolated_test(SIGKILL);
     ::kill(-::getpgrp(), SIGKILL);
   }).detach();

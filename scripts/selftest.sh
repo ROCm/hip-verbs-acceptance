@@ -985,6 +985,35 @@ else
   pass "--local-ranks Ctrl-C cleanup (workers $P_WORKERS are gone)"
 fi
 
+# ===========================================================================
+# Check (q): the deadline kill does not wait on a stalled stderr. The worker's
+# stderr is a FIFO whose reader never reads, pre-filled so any write blocks.
+# Rank 1 retries connecting to a closed rendezvous port; --deadline-sec 1
+# must still end it in about a second. Before the fix, the watchdog's
+# fprintf blocked and the worker ran until the outer `timeout`.
+# ===========================================================================
+Q_FIFO="$TMP/q.fifo"
+mkfifo "$Q_FIFO"
+sleep 30 <"$Q_FIFO" &
+Q_READER=$!
+exec 3>"$Q_FIFO"
+head -c 65536 /dev/zero >&3
+Q_T0=$(date +%s)
+timeout 15 "$BIN" --worker --rank 1 --size 2 --rendezvous 127.0.0.1:1 \
+    --results-out "$TMP/q.kv" --deadline-sec 1 --filter syn2_barrier \
+    --vendor synthetic 2>&3
+RC_Q=$?
+Q_ELAPSED=$(( $(date +%s) - Q_T0 ))
+exec 3>&-
+kill "$Q_READER" 2>/dev/null
+wait "$Q_READER" 2>/dev/null
+if [ "$RC_Q" -eq 124 ] || [ "$Q_ELAPSED" -gt 5 ]; then
+  fail "deadline kill with stalled stderr" \
+       "exit=$RC_Q after ${Q_ELAPSED}s (watchdog blocked on stderr?)"
+else
+  pass "deadline kill with stalled stderr (exit $RC_Q after ${Q_ELAPSED}s)"
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------
