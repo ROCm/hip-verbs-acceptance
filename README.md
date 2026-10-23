@@ -47,22 +47,37 @@ keeping the auto-policy lookup (`<binary_dir>/policy/...`) working out of the bo
 
 ### 3. Run the Verbs tests (two ranks / two nodes)
 
-The RDMA data-path tests need two endpoints. On one host, use two local ranks.
-Both ranks open the same NIC (`--device`, else the first one with an ACTIVE
-port) and the same GPU (HIP device 0), so this is a single-NIC loopback check,
-not a NIC-to-NIC one:
+The RDMA data-path tests need two endpoints. The launch flags follow mpirun:
+`-n` total ranks (1 or 2), `-ppn` ranks per host, `-hosts` the host list
+(default `localhost`). On one host, use two local ranks:
 
 ```bash
-./build/hva --local-ranks 2 --filter-category 'verbs/*' \
+./build/hva -n 2 --filter-category 'verbs/*' \
       --kind func --report report.json
 ```
 
-Across two real nodes (rank 0 listens on `nodes[0]`, rank 1 is launched by the
-selected `--remote-launcher`; binary + policy must be at the **same absolute
-path** on both, e.g. a shared FS):
+Each local rank gets its own GPU and NIC: GPU = its local rank (`--device`
+overrides), NIC = that GPU's nearest ACTIVE NIC (`--hca` overrides). Both flags
+take one value or one per local rank, e.g. `-n 2 --device 0,4` or
+`-n 2 --hca bnxt_re0,bnxt_re1`; `--hca` alone picks the GPU nearest to it. When
+affinity is unknown (or ties), the first ACTIVE NIC is used and a `note:` line
+says why. A `selection:` line per rank prints the pair before the test lines
+(e.g. `selection: rank 1 on node1: GPU 1 (default), HCA bnxt_re1 (affinity)`),
+and each node's `selection` in `report.json` records it. Pinning both ranks to
+one NIC (`--hca bnxt_re0`) makes it a single-NIC loopback check.
+
+A GPU-only host (no RDMA device) prints `HCA none` and can run the HIP tests:
+`hva --filter-category 'hip/*' --vendor mi350_thor` (or any policy for that
+GPU). Without `--vendor`/`--policy` it looks for `policy/<gpu>.csv`, else runs
+in discovery mode. The verbs tests skip there, which fails a `MUST_PASS` gate,
+so filter them out.
+
+Across two real nodes (rank 0 listens on the first host, rank 1 is launched by
+the selected `--remote-launcher`; binary + policy must be at the **same
+absolute path** on both, e.g. a shared FS):
 
 ```bash
-./build/hva --nodes host1,host2 --filter-category 'verbs/*' \
+./build/hva -n 2 -hosts host1,host2 --filter-category 'verbs/*' \
       --kind func --report report.json
 #   [--remote-launcher ssh|srun] [--port P] [--remote-binary PATH] [--launch-timeout S]
 #   ssh only: [--ssh-user U] [--forward-env LIST] [--no-forward-env]
@@ -73,7 +88,7 @@ Two launchers are available via `--remote-launcher` (default `ssh`):
 - **`ssh`** — the default; works anywhere passwordless ssh between the
   allocated nodes is set up (`~/.ssh/config` or `--ssh-user`). Each ssh worker
   otherwise starts with only the remote login environment, not the launcher's,
-  so `--nodes` forwards a fixed set of launcher environment variables to every
+  so the ssh launcher forwards a fixed set of launcher environment variables to every
   worker; see [Env forwarding](#env-forwarding-ssh-launcher-only) below.
 - **`srun`** — use this inside a Slurm allocation where direct ssh between
   compute nodes is blocked (a common cluster policy). It requires
@@ -99,7 +114,7 @@ it with the same hva version as the launcher.
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
 `verbs/hip_mixed` subset (GPU memory registration / GDR paths) is a good local
-check: `--local-ranks 2 --filter-category 'verbs/hip_mixed'`.
+check: `-n 2 --filter-category 'verbs/hip_mixed'`.
 
 Swap `--kind func` for `--kind perf` to also collect latency/bandwidth metrics
 into `report.json` (see [Performance](#performance)).
@@ -121,7 +136,7 @@ report: mode=gate | pass=52 fail=2 skip=5 na=3 | flagged=0 | -> report.json
 ACCEPTANCE: FAIL — 2 test(s) failed the gate
 ```
 
-A clean run (here the `verbs/hip_mixed` subset, `--local-ranks 2`) ends:
+A clean run (here the `verbs/hip_mixed` subset, `-n 2`) ends:
 
 ```
 report: mode=gate | pass=17 fail=0 skip=10 na=0 | flagged=0 | -> report.json
@@ -158,9 +173,12 @@ not a suite defect.
 | `--policy <file>` | use a specific policy CSV directly (highest priority) |
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
-| `--local-ranks 2` | spawn two local ranks on one NIC and GPU (loopback) and reconcile (for `verbs/*` two-node tests) |
-| `--nodes h1,h2` | launch one worker per node and reconcile |
-| `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
+| `-n`, `-np` `<n>` | total ranks, 1 (default) or 2; two ranks are launched as workers and reconciled (for `verbs/*` two-node tests) |
+| `-ppn <p>` | ranks per host (default `ceil(n / #hosts)`), filled in block order as with mpirun |
+| `-hosts h1[,h2]` | hosts to place ranks on (default `localhost`); ranks on other hosts start via `--remote-launcher` |
+| `--hca <name>[,...]` | RDMA device per local rank (default: the GPU's nearest ACTIVE NIC) |
+| `--device <n>[,...]` | GPU (HIP ordinal) per local rank (default: the local rank, or the GPU nearest to `--hca`) |
+| `--remote-launcher ssh\|srun` | how a rank on another host is started (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
 | `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
 | `--deadline-sec <s>` | worker-only; set automatically by the launcher (not a flag you pass by hand) so the worker self-destructs if the launcher gives up |
 | `--quiet` | print only the summary (suppress per-test lines) |
@@ -173,11 +191,11 @@ Full list: `./build/hva --help`.
 
 ## Env forwarding (ssh launcher only)
 
-ssh workers do not automatically share the launcher's environment — `--nodes`
-ssh-launches each worker with its **remote login environment**, which can carry
+ssh workers do not automatically share the launcher's environment — the ssh
+launcher starts each worker with its **remote login environment**, which can carry
 a different (or no) ROCm. To make the common case ("test the ROCm I have
 `LD_LIBRARY_PATH`/`ROCM_PATH` pointed at, not whatever is on the node image")
-work out of the box, `--nodes` **forwards a fixed list of variables from the
+work out of the box, the ssh launcher **forwards a fixed list of variables from the
 launcher's own environment by default**:
 
 ```
@@ -273,7 +291,7 @@ The authoritative "harness behaves correctly" check asserts the full matrix:
 bash scripts/selftest.sh ./build/hva .  # end-to-end checks against the synthetic oracle
 ```
 
-The 2-node synthetic tests run on one host with `--local-ranks 2 --filter 'syn2_*'`.
+The 2-node synthetic tests run on one host with `-n 2 --filter 'syn2_*'`.
 
 ---
 
@@ -299,10 +317,14 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact (`schema_version: "1.2"`). Top level: `harness`
+The machine artifact (`schema_version: "1.3"`). Top level: `harness`
 (`{version, git_sha}` — the build-time harness version and git SHA, also
 printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
-e.g. from a source tarball), `mode`, `summary` counts, per-node `environment`,
+e.g. from a source tarball), `mode`, `launch` (`{np, ppn, hosts}` — the run's
+`-n` / `-ppn` / `-hosts` shape), `summary` counts, per-node `environment`
+and `selection` (`{hca, gpu, hca_source, gpu_source, local, note}` — the NIC
+and HIP GPU the rank used, each source `user` / `affinity` / `default`, `local`
+when the NIC is the GPU's nearest, and `note` why a fallback was taken),
 and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
 perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
 `perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.

@@ -19,7 +19,7 @@
 //   put_first   -- GPU pre-reads the signal (warms L2 stale), NIC writes, THEN
 //                  the wait is armed -- the hard coherence case.
 //   cross_nic   -- put_first ordering but driven through a NIC that is NOT
-//                  GPU-0's PCIe-nearest device (resolved by name via
+//                  the selected GPU's PCIe-nearest device (resolved by name via
 //                  far_nic_for_gpu); skips when the host has no such NIC.
 //
 // TwoNode topology: runs in-process in each worker under the shared
@@ -40,6 +40,7 @@
 #include "common/Capability.hpp"
 #include "common/Perf.hpp"
 #include "common/PosixUtil.hpp"
+#include "common/Selection.hpp"
 #include "common/TestRegistry.hpp"
 #include "hip/utils/HipModule.hpp"
 
@@ -64,16 +65,15 @@ constexpr uint64_t kStaleReadPoison = 0xEEEEEEEEEEEEEEEEULL;
 
 enum class Variant { WaitFirst, PutFirst, CrossNic };
 
-// Pick an RDMA device that is NOT GPU `gpu`'s PCIe-nearest NIC (the "far NIC"
+// Pick an RDMA device that is NOT HIP GPU `gpu`'s PCIe-nearest NIC (the "far NIC"
 // path the cross_nic variant is meant to stress). Uses the shared affinity
 // probe. Returns "" when GPU->NIC affinity is unknown or there is no other
 // device (single NIC), so the variant skips instead of silently reusing the
 // nearest NIC.
 std::string far_nic_for_gpu(int gpu) {
   const EnvironmentInfo& env = environment();
-  std::string nearest;
-  for (const auto& a : env.gpu_nic_affinity)
-    if (a.gpu_ordinal == gpu) { nearest = a.nearest_nic; break; }
+  const GpuNicAffinity* a = affinity_for_gpu(env, gpu);
+  const std::string nearest = a == nullptr ? "" : a->nearest_nic;
   if (nearest.empty()) return "";  // can't tell which NIC is "far"
   for (const auto& d : env.rdma_devices)
     if (!d.device.empty() && d.device != nearest) return d.device;
@@ -293,16 +293,17 @@ TestResult coherence_run(TestContext& ctx, Variant variant) {
       ibvw::safe_dereg_mr(src_mr);
   };
 
-  // cross_nic: bind the QP to a NIC that is NOT GPU-0's PCIe-nearest device so
-  // the GDR path crosses a PCIe switch / root complex (the coherence hazard the
-  // variant targets). wait_first/put_first use the first active device ("").
+  // cross_nic: bind the QP to a NIC that is NOT the GPU's PCIe-nearest device
+  // so the GDR path crosses a PCIe switch / root complex (the coherence hazard
+  // the variant targets). wait_first/put_first use the selected HCA ("").
   std::string dev_name;
   Gate mine = Gate::Ok;
   if (variant == Variant::CrossNic) {
-    dev_name = far_nic_for_gpu(0);
+    dev_name = far_nic_for_gpu(gpu());
     if (dev_name.empty()) {
       mine = Gate::Skip;
-      reason = "cross_nic: no RDMA device other than GPU-0's nearest NIC";
+      reason = "cross_nic: no RDMA device other than GPU " + std::to_string(gpu()) +
+               "'s nearest NIC";
     }
   }
 

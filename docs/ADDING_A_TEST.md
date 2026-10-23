@@ -41,7 +41,7 @@ receives `ctx` (rank/size/bootstrap) and returns `pass()`, `fail("reason")`, or
 // in hip/<category>.cc, inside namespace acceptance, guarded by ACCEPT_HAVE_HIP
 ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));  // this rank's GPU (--device / local rank)
 
   DeviceBuffer buf;
   HIP_CHECK(buf.allocate(4096));
@@ -53,6 +53,10 @@ ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 3
 
 `HIP_CHECK(expr)` returns `fail()` with the call text + `hipGetErrorString` on a
 non-`hipSuccess` return, and (under `--kind perf`) records the call's latency.
+
+Pass `gpu()`, never a literal `0`, wherever a call takes a device. A test that
+`fork()`s before its first HIP call must be added to the exceptions in
+`prepare_test` (`main.cc`), so HIP is not initialized ahead of the fork.
 
 ### Verbs template
 

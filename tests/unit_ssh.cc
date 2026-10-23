@@ -5,10 +5,11 @@
  ************************************************************************/
 
 // unit_ssh — unit tests for the ssh/srun/CLI builders + quoting that the
-// --nodes launcher relies on (common/SshLauncher.*). Covers shell_single_quote,
-// build_ssh_argv, build_remote_command (incl. --policy made ABSOLUTE & quoted
-// and --filter single-quoted so a glob can't be expanded), build_launch_argv's
-// ssh/srun dispatch, and split_nodes.
+// launcher relies on for remote ranks (common/SshLauncher.*). Covers
+// shell_single_quote, shell_quote_if_needed, build_ssh_argv,
+// build_remote_command (a glob such as --filter 'syn2_*' stays quoted so the
+// remote shell can't expand it), build_launch_argv's ssh/srun dispatch, and
+// split_nodes. The worker flags themselves are tested in unit_launch.cc.
 
 #include <algorithm>
 #include <string>
@@ -98,103 +99,58 @@ void test_build_ssh_argv() {
   }
 }
 
+void test_shell_quote_if_needed() {
+  // Safe tokens pass through unchanged: flags, integers, host:port, paths.
+  CHECK_EQ_STR(shell_quote_if_needed("--worker"), "--worker",
+               "quote_if_needed: flag unchanged");
+  CHECK_EQ_STR(shell_quote_if_needed("node0:18620"), "node0:18620",
+               "quote_if_needed: host:port unchanged");
+  CHECK_EQ_STR(shell_quote_if_needed("/abs/policy.csv"), "/abs/policy.csv",
+               "quote_if_needed: plain path unchanged");
+  CHECK_EQ_STR(shell_quote_if_needed("-"), "-",
+               "quote_if_needed: '-' unchanged");
+  // Anything the shell would interpret is single-quoted.
+  CHECK_EQ_STR(shell_quote_if_needed("syn2_*"), "'syn2_*'",
+               "quote_if_needed: glob quoted");
+  CHECK_EQ_STR(shell_quote_if_needed("hip/[a-z]*"), "'hip/[a-z]*'",
+               "quote_if_needed: bracket glob quoted");
+  CHECK_EQ_STR(shell_quote_if_needed("a b"), "'a b'",
+               "quote_if_needed: space quoted");
+  CHECK_EQ_STR(shell_quote_if_needed("$HOME"), "'$HOME'",
+               "quote_if_needed: $ quoted");
+  CHECK_EQ_STR(shell_quote_if_needed("a'b"), "'a'\\''b'",
+               "quote_if_needed: embedded quote escaped");
+  CHECK_EQ_STR(shell_quote_if_needed(""), "''",
+               "quote_if_needed: empty string stays an argument");
+}
+
 void test_build_remote_command() {
-  RemoteCommandParams p;
-  p.policy          = "policy";     // RELATIVE -> must be made absolute
-  p.filter          = "syn2_*";     // glob -> must be single-quoted
-  p.filter_class    = "must_pass";
-  p.filter_category = "hip/*";      // glob -> must be single-quoted
-  p.hide_na         = true;
-  p.kind            = "func";
-  p.isolate         = "all";
-  p.isolate_explicit = true;
+  const std::vector<std::string> args = {
+      "--worker", "--rank", "0", "--rendezvous", "node0:18620",
+      "--results-out", "-", "--filter", "syn2_*", "--vendor", "acme; rm -rf /"};
+  const std::string cmd = build_remote_command({}, "/abs/hva", args);
 
-  const std::string cmd = build_remote_command(
-      p, /*rank=*/0, /*size=*/2, "/abs/hva", "node0:18620", "synthetic");
-
-  // All interpolated values are single-quoted (shell-injection / spaces guard).
-  CHECK(contains(cmd, "'/abs/hva'"),
-        "remote cmd single-quotes the binary path");
-  CHECK(contains(cmd, "--worker"), "remote cmd has --worker");
-  CHECK(contains(cmd, "--rank 0"), "remote cmd has --rank 0");
-  CHECK(contains(cmd, "--size 2"), "remote cmd has --size 2");
-  CHECK(contains(cmd, "--rendezvous 'node0:18620'"),
-        "remote cmd single-quotes --rendezvous host:port");
-  CHECK(contains(cmd, "--results-out -"),
-        "remote cmd routes results to stdout");
-  CHECK(contains(cmd, "--vendor 'synthetic'"), "remote cmd single-quotes --vendor");
-  CHECK(contains(cmd, "--kind 'func'"), "remote cmd single-quotes --kind");
-  CHECK(contains(cmd, "--isolate 'all'"),
-        "remote cmd single-quotes --isolate when explicit");
-
-  // --filter / --filter-category are SINGLE-QUOTED so the remote shell can't
-  // expand the globs.
+  CHECK(cmd.rfind("'/abs/hva' --worker --rank 0", 0) == 0,
+        "remote cmd: quoted binary, then the args in order");
+  CHECK(contains(cmd, "--rendezvous node0:18620"),
+        "remote cmd: safe values are not quoted");
+  CHECK(contains(cmd, "--results-out -"), "remote cmd routes results to stdout");
+  // The glob is SINGLE-QUOTED so the remote shell can't expand it.
   CHECK(contains(cmd, "--filter 'syn2_*'"),
         "remote cmd single-quotes the --filter glob");
   CHECK(!contains(cmd, "--filter syn2_*"),
         "remote cmd does NOT pass the glob unquoted");
-  CHECK(contains(cmd, "--filter-class 'must_pass'"),
-        "remote cmd forwards --filter-class single-quoted");
-  CHECK(contains(cmd, "--filter-category 'hip/*'"),
-        "remote cmd forwards --filter-category single-quoted");
-  CHECK(contains(cmd, "--hide-na"),
-        "remote cmd forwards --hide-na when set");
+  // Values with shell metacharacters are quoted, not interpolated raw — no
+  // word-splitting, no injection into the remote shell.
+  CHECK(contains(cmd, "--vendor 'acme; rm -rf /'"),
+        "vendor with shell metacharacters is single-quoted (no injection)");
+  CHECK(!contains(cmd, "--vendor acme; rm"),
+        "metacharacters never reach the remote shell unquoted");
 
-  // --policy is made ABSOLUTE (starts with '/') and single-quoted.
-  CHECK(contains(cmd, "--policy '/"),
-        "remote cmd makes --policy absolute and single-quotes it");
-
-  // R3 hardening: values with spaces / shell metacharacters must be single-quoted,
-  // not interpolated raw — no word-splitting, no injection into the remote shell.
-  {
-    const std::string evil = build_remote_command(
-        p, 0, 2, "/opt/my tools/sa", "h:1", "acme; rm -rf /");
-    CHECK(contains(evil, "'/opt/my tools/sa'"),
-          "binary path containing a space is single-quoted");
-    CHECK(contains(evil, "--vendor 'acme; rm -rf /'"),
-          "vendor with shell metacharacters is single-quoted (no injection)");
-    CHECK(!contains(evil, "--vendor acme; rm"),
-          "metacharacters never reach the remote shell unquoted");
-  }
-
-  // When isolate is NOT explicit, --isolate is omitted entirely.
-  {
-    RemoteCommandParams q;
-    q.kind = "func";
-    q.isolate = "all";
-    q.isolate_explicit = false;
-    const std::string c2 = build_remote_command(q, 1, 2, "/abs/hva",
-                                                "n0:1", "synthetic");
-    CHECK(!contains(c2, "--isolate"),
-          "remote cmd omits --isolate when not explicit");
-    CHECK(!contains(c2, "--filter"),
-          "remote cmd omits --filter when empty");
-    CHECK(!contains(c2, "--filter-class"),
-          "remote cmd omits --filter-class when empty");
-    CHECK(!contains(c2, "--filter-category"),
-          "remote cmd omits --filter-category when empty");
-    CHECK(!contains(c2, "--hide-na"),
-          "remote cmd omits --hide-na when false");
-    CHECK(!contains(c2, "--policy"),
-          "remote cmd omits --policy when empty");
-    // deadline_sec defaults to 0 (struct default): the flag must be entirely
-    // absent, not emitted as "--deadline-sec 0" -- keeps the command
-    // byte-identical to before --deadline-sec existed for any caller that
-    // never sets the field (backward-compatibility requirement).
-    CHECK(!contains(c2, "--deadline-sec"),
-          "remote cmd omits --deadline-sec when 0 (default)");
-  }
-
-  // --deadline-sec is forwarded when the launcher sets it (> 0).
-  {
-    RemoteCommandParams q;
-    q.kind = "func";
-    q.deadline_sec = 130;
-    const std::string c3 = build_remote_command(q, 0, 2, "/abs/hva",
-                                                 "n0:1", "synthetic");
-    CHECK(contains(c3, "--deadline-sec 130"),
-          "remote cmd forwards --deadline-sec <launch_timeout+10>");
-  }
+  // A binary path with a space stays one word.
+  const std::string spaced = build_remote_command({}, "/opt/my tools/hva", {});
+  CHECK_EQ_STR(spaced, "'/opt/my tools/hva'",
+               "binary path containing a space is single-quoted");
 }
 
 void test_build_launch_argv() {
@@ -277,25 +233,21 @@ void test_split_nodes() {
 }
 
 void test_build_remote_command_env_forwarding() {
-  RemoteCommandParams p;
-  p.kind = "func";
+  const std::vector<std::string> args = {"--worker"};
 
-  // Empty env (the default/zero value) -> command identical to before env forwarding:
-  // no "env" prefix at all.
+  // Empty env -> no "env" prefix at all.
   {
-    const std::string cmd =
-        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    const std::string cmd = build_remote_command({}, "/abs/hva", args);
     CHECK(cmd.rfind("'/abs/hva'", 0) == 0,
           "empty env: command starts with the binary, no env prefix");
     CHECK(!contains(cmd, "env '"), "empty env: no 'env ...' prefix at all");
   }
 
   // Two vars -> "env 'A=1' 'B=x y' " immediately precedes the binary, in the
-  // order given (do_nodes is responsible for sorting before calling in).
+  // order given (the launcher sorts before calling in).
   {
-    p.env = {{"A", "1"}, {"B", "x y"}};
     const std::string cmd =
-        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+        build_remote_command({{"A", "1"}, {"B", "x y"}}, "/abs/hva", args);
     CHECK(cmd.rfind("env 'A=1' 'B=x y' '/abs/hva'", 0) == 0,
           "two vars: command starts with env 'A=1' 'B=x y' '<binary>'");
   }
@@ -304,9 +256,8 @@ void test_build_remote_command_env_forwarding() {
   // and a value containing an embedded newline survives literally (single
   // quotes are the one POSIX quoting form that preserves it).
   {
-    p.env = {{"Q", "a'b"}, {"N", "line1\nline2"}};
-    const std::string cmd =
-        build_remote_command(p, 0, 1, "/abs/hva", "n0:1", "synthetic");
+    const std::string cmd = build_remote_command(
+        {{"Q", "a'b"}, {"N", "line1\nline2"}}, "/abs/hva", args);
     CHECK(contains(cmd, "'Q=a'\\''b'"),
           "env value with an embedded quote is escaped correctly");
     CHECK(contains(cmd, "'N=line1\nline2'"),
@@ -315,8 +266,8 @@ void test_build_remote_command_env_forwarding() {
 }
 
 void test_forward_env_pattern_matches() {
-  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_IB_DEVICE"),
-        "ACCEPT_* matches ACCEPT_IB_DEVICE");
+  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_HCA"),
+        "ACCEPT_* matches ACCEPT_HCA");
   CHECK(!forward_env_pattern_matches("ACCEPT_*", "ACCEPTX"),
         "ACCEPT_* does not match ACCEPTX (no '_' boundary)");
   CHECK(forward_env_pattern_matches("PATH", "PATH"),
@@ -406,6 +357,7 @@ void test_parse_forward_env_spec() {
 
 void run_ssh_tests() {
   test_shell_single_quote();
+  test_shell_quote_if_needed();
   test_build_ssh_argv();
   test_build_remote_command();
   test_build_remote_command_env_forwarding();

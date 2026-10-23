@@ -110,10 +110,18 @@ struct ReportInputs {
   // single-node path; left false for multi-rank (so the reconciled cross-rank
   // end-block still prints).
   bool                                     per_test_already_streamed = false;
+  // The launch shape, emitted as report.json `launch`: total ranks, ranks per
+  // host, and the hosts (["localhost"] by default).
+  struct LaunchInfo {
+    int                      np = 1;
+    int                      ppn = 1;
+    std::vector<std::string> hosts{"localhost"};
+  };
+  LaunchInfo                                launch;
   // The ranks/hosts that participated, emitted as report.json `nodes[]`. Each
   // launcher populates this with the actual (rank, host) pairs it ran — one
-  // localhost entry for the single-node path, two for --local-ranks 2, and one
-  // per node for --nodes. When left empty the Reporter falls back to a single
+  // localhost entry for a single in-process rank, else one per launched rank
+  // (-n / -ppn / -hosts). When left empty the Reporter falls back to a single
   // localhost/rank-0 entry.
   // The per-node descriptor carried into report.json `nodes[].environment`. It is
   // populated by the launcher from each worker's `@env` block (or detected

@@ -103,7 +103,9 @@ The policy file is chosen by this priority:
    `<binary_dir>/policy/<nic>.csv`, else discovery. `<gpu>` comes from a
    gfx->marketing map (`gfx950`->`mi350`, `gfx942`->`mi300`, `gfx90a`->`mi250`;
    unmapped arch => no prefix, straight to `<nic>.csv`); `<nic>` is the detected
-   NIC vendor (`connectx` / `thor` / `ionic`, else `synthetic`).
+   NIC vendor (`connectx` / `thor` / `ionic`). A host with GPUs but no known NIC
+   uses `<gpu>.csv` (e.g. `mi350.csv`; `gpu.csv` for an unmapped arch), else
+   discovery; a host with neither uses `synthetic.csv`.
 
 If the resolved file is missing **and it was auto-selected** (cases 2-3 by default
 dir), the suite enters discovery mode: a `WARN`, then all tests run as `MUST_PASS`.

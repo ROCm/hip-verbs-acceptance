@@ -64,8 +64,8 @@ class RcConn {
   RcConn& operator=(const RcConn&) = delete;
 
   // Open an IB device and create PD/CQ/QP up to state INIT, filling local().
-  //   dev_name -- exact device name to open; empty -> ACCEPT_IB_DEVICE env var
-  //               if set, else first device with an ACTIVE port found by
+  //   dev_name -- exact device name to open; empty -> the selected HCA
+  //               (ACCEPT_HCA) if set, else first device with an ACTIVE port found by
   //               ibv_get_device_list (port 1 only; no multi-port scan).
   // Returns "" on success, else a human-readable reason. Sets no_device=true
   // when the host simply has no RDMA hardware (skip-worthy vs. a real fault).
