@@ -108,12 +108,13 @@ struct Options {
   std::string rendezvous;           // --rendezvous HOST:PORT
   int         local_ranks = 0;      // --local-ranks N (launcher; only 2 supported)
 
-  // ssh --nodes launcher (Phase 1b / Step 6).
+  // --nodes launcher: ssh or srun (Phase 1b / Step 6).
   std::string nodes;                // --nodes h1,h2 (comma list; size 1 or 2)
   int         port = 18620;         // --port (rendezvous port on nodes[0])
   std::string ssh_user;             // --ssh-user U (ssh -l U)
   std::string remote_binary;        // --remote-binary PATH (default /proc/self/exe)
   long        launch_timeout = 120; // --launch-timeout SEC (overall deadline)
+  RemoteLauncher remote_launcher = RemoteLauncher::Ssh;  // --remote-launcher ssh|srun
 
   // Env forwarding to ssh workers. ON by default: a trailing '*' in an
   // entry is a prefix match. NOTE: this is a deliberate behaviour change --
@@ -139,9 +140,11 @@ void print_usage(std::FILE* out) {
     "  hva --lint [--policy <file>] [--vendor <name>]  # check coverage\n"
     "  hva --local-ranks 2 [--filter ...] [--policy ...] [--vendor ...] [--report ...]\n"
     "                                                        # spawn 2 local ranks, reconcile\n"
-    "  hva --nodes h1,h2 [--port P] [--ssh-user U] [--remote-binary PATH]\n"
-    "             [--filter ...] [--policy FILE] [--vendor V] [--report R]\n"
-    "                                                        # ssh-launch 1 worker/node, reconcile\n"
+    "  hva --nodes h1,h2 [--remote-launcher ssh|srun] [--port P] [--ssh-user U]\n"
+    "             [--remote-binary PATH] [--filter ...] [--policy FILE]\n"
+    "             [--vendor V] [--report R]\n"
+    "                                                        # launch 1 worker/node (ssh or\n"
+    "                                                        # srun), reconcile\n"
     "  hva --worker --rank N --size M --rendezvous HOST:PORT --results-out FILE\n"
     "                                                        # one rank (spawned by launcher)\n"
     "                                                        # --results-out - writes results to\n"
@@ -178,16 +181,21 @@ void print_usage(std::FILE* out) {
     "                          exit 1 if any found. Does not run tests.\n"
     "  --results-out <path>    Write raw per-worker results (debug)\n"
     "  --local-ranks <n>     Spawn n local ranks (only 2 supported) and reconcile\n"
-    "  --nodes h1[,h2]       ssh-launch one worker per node (1 or 2 nodes) and\n"
-    "                        reconcile into one report.json. Mutually exclusive\n"
-    "                        with --local-ranks.\n"
+    "  --nodes h1[,h2]       launch one worker per node (1 or 2 nodes; ssh or\n"
+    "                        srun, see --remote-launcher) and reconcile into one\n"
+    "                        report.json. Mutually exclusive with --local-ranks.\n"
     "  --port <p>            Rendezvous port on nodes[0] (default 18620)\n"
-    "  --ssh-user <u>        ssh login user (ssh -l u)\n"
+    "  --remote-launcher ssh|srun  How to start each node's worker (default: ssh).\n"
+    "                        srun requires running inside a Slurm allocation\n"
+    "                        (SLURM_JOB_ID set) and is incompatible with --ssh-user;\n"
+    "                        it needs Slurm >= 20.11 for --overlap.\n"
+    "  --ssh-user <u>        ssh login user (ssh -l u); only valid with\n"
+    "                        --remote-launcher ssh\n"
     "  --remote-binary PATH  Remote hva binary path (default: this\n"
     "                        binary's /proc/self/exe). SAME-PATH ASSUMPTION: the\n"
     "                        binary AND the --policy dir must be reachable at the\n"
     "                        SAME absolute path on every node (NFS/shared FS).\n"
-    "  --launch-timeout <s>  Overall ssh launch deadline in seconds (default 120)\n"
+    "  --launch-timeout <s>  Overall launch deadline in seconds (default 120)\n"
     "  --forward-env <list>  Comma-separated env var names forwarded from the\n"
     "                        launcher to each ssh worker; a trailing '*' is a\n"
     "                        prefix match (e.g. 'ACCEPT_*'). Only variables set\n"
@@ -195,7 +203,8 @@ void print_usage(std::FILE* out) {
     "                        Default: LD_LIBRARY_PATH,ROCM_PATH,PATH,\n"
     "                        HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,HSA_*,\n"
     "                        ACCEPT_* (ON by default; ssh launcher only).\n"
-    "  --no-forward-env      Disable env forwarding (old ssh-login-env behaviour)\n"
+    "  --no-forward-env      Disable env forwarding (old ssh-login-env behaviour;\n"
+    "                        ssh launcher only)\n"
     "  --worker              Run one rank (spawned by the launcher)\n"
     "  --rank <n>            This worker's rank\n"
     "  --size <n>            Total rank count (1 or 2)\n"
@@ -343,6 +352,20 @@ int parse_args(int argc, char** argv, Options& opt) {
       opt.port = static_cast<int>(v);
     } else if (a == "--ssh-user") {
       if (!take_value(argc, argv, i, "--ssh-user", opt.ssh_user)) return 2;
+    } else if (a == "--remote-launcher") {
+      std::string v;
+      if (!take_value(argc, argv, i, "--remote-launcher", v)) return 2;
+      if (v == "ssh") {
+        opt.remote_launcher = RemoteLauncher::Ssh;
+      } else if (v == "srun") {
+        opt.remote_launcher = RemoteLauncher::Srun;
+      } else {
+        std::fprintf(stderr,
+                     "error: --remote-launcher must be 'ssh' or 'srun' (got "
+                     "'%s')\n",
+                     v.c_str());
+        return 2;
+      }
     } else if (a == "--remote-binary") {
       if (!take_value(argc, argv, i, "--remote-binary", opt.remote_binary)) return 2;
     } else if (a == "--launch-timeout") {
@@ -359,7 +382,7 @@ int parse_args(int argc, char** argv, Options& opt) {
     }
   }
 
-  // --nodes (ssh launcher) and --local-ranks (localhost launcher) are mutually
+  // --nodes (ssh/srun launcher) and --local-ranks (localhost launcher) are mutually
   // exclusive: they are two different launch backends for the same merge path.
   if (!opt.nodes.empty() && opt.local_ranks != 0) {
     std::fprintf(stderr,
@@ -388,6 +411,32 @@ int parse_args(int argc, char** argv, Options& opt) {
                      pat.c_str());
         return 2;
       }
+    }
+  }
+  // --remote-launcher srun validation: srun has no login-user concept (it runs
+  // inside an existing allocation as the submitting user) and only makes sense
+  // inside a Slurm allocation. It always passes the launcher's whole
+  // environment (--export=ALL), so an explicit forward list or "forward
+  // nothing" cannot be honoured; reject them rather than silently ignore them.
+  if (opt.remote_launcher == RemoteLauncher::Srun) {
+    if (!opt.ssh_user.empty()) {
+      std::fprintf(stderr,
+                   "error: --remote-launcher srun does not accept --ssh-user "
+                   "(srun has no login-user option)\n");
+      return 2;
+    }
+    if (opt.forward_env_explicit || opt.no_forward_env) {
+      std::fprintf(stderr,
+                   "error: --remote-launcher srun does not accept "
+                   "--forward-env/--no-forward-env (srun always passes the "
+                   "launcher's whole environment)\n");
+      return 2;
+    }
+    if (std::getenv("SLURM_JOB_ID") == nullptr) {
+      std::fprintf(stderr,
+                   "error: --remote-launcher srun must run inside a Slurm "
+                   "allocation\n");
+      return 2;
     }
   }
   return 0;
@@ -793,7 +842,8 @@ int do_worker(const Options& opt) {
   Runner runner(ropts);
   const std::vector<TestResult> results = runner.run(part.to_run);
 
-  // --results-out - writes rank block to stdout (ssh --nodes captures it). Each
+  // --results-out - writes rank block to stdout (the --nodes launcher, ssh or
+  // srun, captures it). Each
   // worker emits its DETECTED environment as an @env block so the launcher can
   // build per-node descriptors from the workers' streams.
   const std::string text =
@@ -1039,7 +1089,13 @@ std::vector<std::pair<std::string, std::string>> read_process_environment() {
   return out;
 }
 
-// NODES launcher: ssh one worker per node; same absolute binary+policy path required.
+// Human-readable name of the selected --remote-launcher, for diagnostics.
+const char* launcher_name(RemoteLauncher l) {
+  return l == RemoteLauncher::Srun ? "srun" : "ssh";
+}
+
+// NODES launcher: ssh or srun one worker per node; same absolute binary+policy
+// path required.
 int do_nodes(const Options& opt) {
   const std::vector<std::string> nodes = split_nodes(opt.nodes);
   if (nodes.empty()) {
@@ -1081,7 +1137,7 @@ int do_nodes(const Options& opt) {
   const std::string rendezvous =
       nodes[0] + ":" + std::to_string(opt.port);
 
-  // Build the per-rank ssh specs.
+  // Build the per-rank launch specs (ssh or srun argv is built from these).
   RemoteCommandParams rcp;
   rcp.policy          = opt.policy;
   rcp.filter          = opt.filter;
@@ -1093,12 +1149,10 @@ int do_nodes(const Options& opt) {
   rcp.isolate_explicit = opt.isolate_explicit;
   rcp.gid             = opt.gid;
   rcp.device          = opt.device;
-  // --forward-env: applied for the ssh launcher only -- do_nodes IS
-  // the ssh launcher today. If an srun launcher is added, this must
-  // stay gated on the ssh path: srun propagates the caller's environment by
-  // itself, so forwarding here too would be redundant (harmless, but worth
-  // avoiding the double `env` prefix in the logged remote command).
-  if (!opt.no_forward_env) {
+  // --forward-env: ssh launcher only. srun passes the launcher's whole
+  // environment itself (--export=ALL), so an `env` prefix would be redundant;
+  // parse_args already rejected the explicit flags with srun.
+  if (opt.remote_launcher == RemoteLauncher::Ssh && !opt.no_forward_env) {
     const std::vector<std::string> patterns =
         parse_forward_env_spec(opt.forward_env);
     if (!patterns.empty()) {
@@ -1117,15 +1171,18 @@ int do_nodes(const Options& opt) {
   }
 
   SshLaunchOptions lopts;
+  lopts.launcher = opt.remote_launcher;
   lopts.ssh_user = opt.ssh_user;
   lopts.overall_timeout_sec = opt.launch_timeout;
   // Connect timeout: keep it under the overall deadline so a small
-  // --launch-timeout isn't inverted by a larger ConnectTimeout.
+  // --launch-timeout isn't inverted by a larger ConnectTimeout. Ssh-only
+  // (srun ignores it).
   lopts.connect_timeout = std::min(10, static_cast<int>(opt.launch_timeout));
 
+  const char* const lname = launcher_name(opt.remote_launcher);
   std::fprintf(stderr,
-               "launching %d rank(s) over ssh; rendezvous=%s binary=%s\n",
-               size, rendezvous.c_str(), remote_binary.c_str());
+               "launching %d rank(s) over %s; rendezvous=%s binary=%s\n",
+               size, lname, rendezvous.c_str(), remote_binary.c_str());
 
   const std::vector<SshChildResult> children = ssh_launch(specs, lopts);
 
@@ -1134,8 +1191,8 @@ int do_nodes(const Options& opt) {
   for (const auto& c : children) {
     if (!c.launched) {
       std::fprintf(stderr,
-                   "error: failed to launch ssh for rank %d on %s: %s\n",
-                   c.rank, c.node.c_str(), c.stderr_data.c_str());
+                   "error: failed to launch %s for rank %d on %s: %s\n",
+                   lname, c.rank, c.node.c_str(), c.stderr_data.c_str());
       return 4;
     }
     if (c.timed_out) {
@@ -1149,9 +1206,9 @@ int do_nodes(const Options& opt) {
     }
     if (!c.exited || c.exit_code != 0) {
       std::fprintf(stderr,
-                   "error: rank %d on %s failed (ssh/worker exit_code=%d%s) — "
+                   "error: rank %d on %s failed (%s/worker exit_code=%d%s) — "
                    "launch/bootstrap failure\n",
-                   c.rank, c.node.c_str(), c.exit_code,
+                   c.rank, c.node.c_str(), lname, c.exit_code,
                    c.term_signal ? ", killed by signal" : "");
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
@@ -1279,7 +1336,7 @@ int main(int argc, char** argv) {
   }
   // Publish --gid/--device as env vars BEFORE any detect()/device open. setenv
   // propagates to forked --exec/--worker children automatically (they inherit
-  // the environment); --nodes ssh workers get them forwarded as flags (see the
+  // the environment); --nodes workers (ssh or srun) get them forwarded as flags (see the
   // worker arg builder). Capability reads ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE.
   if (!opt.gid.empty()) ::setenv("ACCEPT_IB_GID_INDEX", opt.gid.c_str(), 1);
   if (!opt.device.empty()) ::setenv("ACCEPT_IB_DEVICE", opt.device.c_str(), 1);

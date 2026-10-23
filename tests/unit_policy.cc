@@ -308,7 +308,8 @@ void test_when_version_edge_cases(const std::string& dir) {
       "edge2,MUST_PASS,rocm>7.0.2,,, 7.12 > 7.0.2\n"
       "edge3,MUST_PASS,rocm<7.0,,, 6.14.14 < 7.0\n"
       "edge4,MUST_PASS,rocm>=3.104.0,,, equality\n"
-      "edge5,MUST_PASS,rocm>=7.0.1,,, 7.0 >= 7.0.1 should be false\n";
+      "edge5,MUST_PASS,rocm>=7.0.1,,, 7.0 >= 7.0.1 should be false\n"
+      "edge6,MUST_PASS,rocm>=10.1,,, suffix after patch is ignored\n";
   write_csv(dir, "vedge", csv);
   const Policy p = load_csv(dir,"vedge");
 
@@ -324,6 +325,11 @@ void test_when_version_edge_cases(const std::string& dir) {
   check_class(p, "vedge", "edge5", Class::Skip,
               "7.0 >= 7.0.1 -> false -> SKIP (software-gated predicate failed)",
               make_env("7.0"));
+  // parse_version ignores the non-numeric suffix after the first non-digit
+  // character in a component, so "10.2.0a20261013" parses as 10.2.0.
+  check_class(p, "vedge", "edge6", Class::MustPass,
+              "rocm>=10.1 with \"10.2.0a20261013\" -> true (suffix ignored)",
+              make_env("10.2.0a20261013"));
 }
 
 void test_when_sym(const std::string& dir) {

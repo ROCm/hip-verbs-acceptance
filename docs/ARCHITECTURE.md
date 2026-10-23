@@ -151,8 +151,8 @@ versions, GPU count) is auto-detected at runtime.
 
 Two concerns are kept separate:
 
-1. **Process launch / placement** — pluggable *launcher*: `ssh` now,
-   `slurm`/`mpirun` later.
+1. **Process launch / placement** — pluggable *launcher*: `ssh` or `srun` now
+   (`--remote-launcher ssh|srun`), `mpirun` later.
 2. **Runtime out-of-band (OOB) exchange** — pluggable *bootstrap*: how ranks find
    each other and swap QP metadata at runtime.
 
@@ -177,9 +177,10 @@ least-justified component in the suite. So `SocketBootstrap` implements:
 
 `allgather` is kept in the interface (it is what the global Reporter rendezvous
 uses) but is only required to be correct for `size ≤ 2` in this iteration. True
-N-rank support is deferred to the same bucket as the slurm/mpirun launcher
-(§13). `MpiBootstrap`, when present, is naturally N-rank and can be used for
-larger runs.
+N-rank support is deferred to the same bucket as the mpirun launcher (§13); the
+`ssh`/`srun` launchers only place one process per node each — they do not, by
+themselves, make `SocketBootstrap` N-rank. `MpiBootstrap`, when present, is
+naturally N-rank and can be used for larger runs.
 
 ```cpp
 // common/Bootstrap.hpp
@@ -617,7 +618,7 @@ selection filter narrowed the run.
 
 ```jsonc
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "mode": "gate",                              // gate | discovery
   "filtered": false,                           // true when --filter*/--kind narrowed the run
   "summary": { "passed": 0, "failed": 0, "skipped": 0, "not_applicable": 0 },
@@ -626,7 +627,9 @@ selection filter narrowed the run.
     { "host": "node-a", "rank": 0,
       "environment": {                         // detected dimensions, per node
         "vendor": "thor", "rdma_prefix": "bnxt_re",
-        "rocm_version": "7.0.1", "gpu_count": 8,
+        "rocm_version": "7.0.1", "rocm_path": "/opt/rocm-7.0.1",
+        "rocm_version_source": "runtime_info",                  // runtime_info | rocm_path | hip_runtime | opt_rocm | none
+        "gpu_count": 8,
         "kernel": "5.15.0", "os": "Ubuntu 22.04",
         "gpu_model": "…", "driver_version": "…",
         "symbols": { "libionic": false, "hsa_amd_portable_export_dmabuf": true },
@@ -765,9 +768,10 @@ directory — mixed HIP+verbs tests live under `verbs/`.*
   **behaviour change**: previously, ssh workers always ran with the remote
   login environment only. `build_remote_command` prefixes the command with
   `env 'K=V' ...` (each pair single-quoted as one token) when the resolved list
-  is non-empty; see `common/SshLauncher.cpp`. Applies to the ssh launcher only —
-  an `srun` launcher propagates the caller's environment by itself and must not
-  also apply this forwarding (gate on "launcher is ssh" if both land).
+  is non-empty; see `common/SshLauncher.cpp`. Applies to the ssh launcher only:
+  `--remote-launcher srun` passes the caller's whole environment itself
+  (`--export=ALL`), adds no `env` prefix, and rejects `--forward-env` /
+  `--no-forward-env` (exit 2).
 - **Privileges & destructive tests (not implemented).** Link-down/`nicctl`-style
   destructive tests and an `--allow-destructive` gate are **planned, not built**
   (§13). The suite currently issues no destructive operations.
@@ -782,7 +786,8 @@ environment is auto-detected.
 
 ```
 hva                            # single-node loopback, all func tests
-hva --nodes h1,h2              # ssh multi-node launcher
+hva --nodes h1,h2              # multi-node launcher (ssh or srun)
+           [--remote-launcher ssh|srun]     # default: ssh
            [--ssh-user <name>]              # default: ~/.ssh/config / current user
            [--port <n>] [--remote-binary <path>] [--launch-timeout <sec>]
            [--forward-env <list>] [--no-forward-env]  # default list forwards
@@ -889,8 +894,12 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   a short timeout — **not** a mirror of the MPI `ASSERT_BOOTSTRAP_*` macro family.
   This buys the graceful-exit benefit for a fraction of the cost and without the
   size==1 no-op and §7.3 double-count footguns (see §4 non-goal, §7.3 rule 4).
-- `slurm` / `mpirun` launcher plugins (launcher/bootstrap split already admits
-  them).
+- `mpirun` launcher plugin (launcher/bootstrap split already admits it).
+  *`srun` is implemented* (`--remote-launcher srun`) — one
+  task per allocated node via `srun --nodes=1 --ntasks=1 --nodelist=<n>
+  --overlap --export=ALL`, for clusters where direct ssh between compute nodes is blocked.
+  Requires Slurm >= 20.11 (`--overlap`) and `SLURM_JOB_ID` set (i.e. running
+  inside an allocation).
 - `fw_version`-ranged classification entries (firmware-aware gating).
 - Performance baselines + tolerance-based regression gating (§9).
 - Multi-NIC-per-node and full heterogeneous-cluster support (current assumption:

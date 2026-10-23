@@ -485,6 +485,8 @@ int write_report(const Policy& policy, const ReportInputs& in,
         << "\n        \"vendor\": "       << jstr_or_null(env.vendor) << ","
         << "\n        \"rdma_prefix\": "  << jstr_or_null(env.rdma_prefix) << ","
         << "\n        \"rocm_version\": " << jstr_or_null(env.rocm_version) << ","
+        << "\n        \"rocm_path\": "    << jstr_or_null(env.rocm_path) << ","
+        << "\n        \"rocm_version_source\": " << jstr_or_null(env.rocm_version_source) << ","
         << "\n        \"gpu_count\": "    << jnum(static_cast<long long>(env.gpu_count)) << ","
         << "\n        \"kernel\": "       << jstr_or_null(env.kernel) << ","
         << "\n        \"os\": "           << jstr_or_null(env.os) << ","
@@ -552,7 +554,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.0") << ","
+      << "\n  \"schema_version\": " << jstr("1.1") << ","
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
       << "\n  \"summary\": {"
