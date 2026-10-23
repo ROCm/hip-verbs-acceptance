@@ -93,7 +93,8 @@ pass) rather than being left running and holding GPU memory / QPs for the
 next job on that node. This only applies to workers started BY the launcher;
 running `--worker` by hand (no launcher involved) is unaffected. An older
 `--remote-binary` built before this existed does not understand
-`--deadline-sec` and exits 2 -- rebuild it from this branch or later.
+`--deadline-sec` and exits 2, which fails the run with exit 4 -- rebuild
+it with the same hva version as the launcher.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the

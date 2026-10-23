@@ -934,6 +934,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   monitor, and reading it from two threads is on its own a bigger change
   than this fix warrants; see the pull request description for the full rationale.
   Older `--remote-binary` builds predate `--deadline-sec` and reject it
-  (exit 2) — they must be rebuilt from this branch or later.
+  (exit 2), which fails the run with exit 4 — rebuild them with the
+  launcher's hva version.
 - **Observability** — per-rank logs collected to the launcher's `--report`
   sibling dir; environment descriptor captured verbatim for reproducibility.
