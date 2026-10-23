@@ -43,6 +43,7 @@ add_executable(hva
   common/Capability.cpp
   common/SockCompat.cpp
   common/SocketBootstrap.cpp
+  common/Launch.cpp
   common/SshLauncher.cpp
   synthetic/basic.cc
   synthetic/failures.cc
@@ -184,6 +185,7 @@ add_executable(unit_tests
   tests/unit_policy.cc
   tests/unit_resultio.cc
   tests/unit_ssh.cc
+  tests/unit_launch.cc
   tests/unit_perf.cc
   tests/unit_capability.cc
   common/Reporter.cpp
@@ -191,6 +193,7 @@ add_executable(unit_tests
   common/Policy.cpp
   common/ResultIO.cpp
   common/Capability.cpp
+  common/Launch.cpp
   common/SshLauncher.cpp
   common/TestRegistry.cpp
 )
@@ -204,7 +207,7 @@ add_dependencies(unit_tests generate_version)
 enable_testing()
 add_test(NAME unit_tests COMMAND unit_tests)
 
-# install() for --nodes same-path binary assumption. The policy CSVs are
+# install() for the -hosts same-path binary assumption. The policy CSVs are
 # installed next to the binary (<prefix>/bin/policy/*.csv) to match the
 # auto-policy lookup (<binary_dir>/policy/<gpu>_<nic>.csv, see
 # resolve_policy_path() in main.cc), so a packaged install works without the

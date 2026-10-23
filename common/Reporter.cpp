@@ -560,16 +560,26 @@ int write_report(const Policy& policy, const ReportInputs& in,
     }
   }
 
+  std::string launch_hosts = "[";
+  for (size_t i = 0; i < in.launch.hosts.size(); ++i)
+    launch_hosts += (i ? ", " : "") + jstr(in.launch.hosts[i]);
+  launch_hosts += "]";
+
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.2") << ","
+      << "\n  \"schema_version\": " << jstr("1.3") << ","
       << "\n  \"harness\": {"
       << "\n    \"version\": " << jstr(kHarnessVersion) << ","
       << "\n    \"git_sha\": "  << jstr(kGitSha)
       << "\n  },"
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
+      << "\n  \"launch\": {"
+      << "\n    \"np\": "    << jnum(static_cast<long long>(in.launch.np)) << ","
+      << "\n    \"ppn\": "   << jnum(static_cast<long long>(in.launch.ppn)) << ","
+      << "\n    \"hosts\": " << launch_hosts
+      << "\n  },"
       << "\n  \"summary\": {"
       << "\n    \"passed\": "         << jnum(static_cast<long long>(n_pass)) << ","
       << "\n    \"failed\": "         << jnum(static_cast<long long>(n_fail)) << ","

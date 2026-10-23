@@ -6,34 +6,36 @@
 
 #pragma once
 
-// SshLauncher — the in-binary ssh/srun multi-node launcher (Phase 1b / Plan
-// Step 6).
+// SshLauncher — starts one worker process per rank and collects its output.
 //
-// Given a node list and a per-rank remote command, it fans out one child
-// per rank (an `ssh` or an `srun` process, selected by SshLaunchOptions::launcher),
-// captures each child's stdout (the per-rank results block, produced
-// by the worker's `--results-out -`) and stderr (human/log output) on separate
-// pipes, waits for all children under a single overall wall-clock deadline, and
-// kills/reaps any that overrun. Nothing hangs: every wait is bounded and every
-// child is reaped (no zombies); every pipe end is closed (no fd leaks).
+// A rank on another host is started through `ssh` or `srun` (selected by
+// SshLaunchOptions::launcher); a rank on this host (SshRank::local_argv set)
+// is fork/exec'd directly. Either way the launcher captures the child's stdout
+// (the per-rank results block, produced by the worker's `--results-out -`) and
+// stderr (human/log output) on separate pipes, waits for all children under a
+// single overall wall-clock deadline, and kills/reaps any that overrun.
+// Nothing hangs: every wait is bounded and every child is reaped (no zombies);
+// every pipe end is closed (no fd leaks).
 //
 // SAME-PATH ASSUMPTION (NFS / shared FS deployments): the remote binary
 // and the policy directory must be reachable at the SAME absolute path on every
 // node. The launcher defaults the remote binary to its own /proc/self/exe and
-// passes the policy dir through unchanged; both are overridable on the CLI.
+// passes the policy path as an absolute path; both are overridable on the CLI.
 //
 // Scope: size in {1, 2} only (mirrors SocketBootstrap's size<=2 scope). The
-// rendezvous is nodes[0]:port — rank 0 runs on nodes[0] (listener binds
-// 0.0.0.0), rank 1 on nodes[1] (dials nodes[0]:port). Under --remote-launcher
-// srun, rank 0's node is launched via `srun --nodelist=<node>` exactly like any
-// other rank — there is no local-node special case.
+// rendezvous is rank 0's host:port — rank 0 is the listener (binds 0.0.0.0),
+// rank 1 dials it. Rank placement lives in Launch.hpp.
 //
-// Deadline handling is identical for both launchers: on overrun, ssh_launch
-// SIGTERMs the child, waits a 2s grace period, then SIGKILLs. For ssh this
-// kills the local ssh client (the remote worker may linger — worker
-// self-cleanup is handled separately). For srun, srun forwards SIGTERM to the remote task step, and
-// if srun itself is SIGKILLed, Slurm's slurmd/slurmstepd cleans up the step on
-// that node so the task does not leak past the launcher's exit.
+// Deadline handling is identical for every child: on overrun, ssh_launch
+// SIGTERMs it, waits a 2s grace period, then SIGKILLs. A local worker leads
+// its own process group and the whole group is signalled. For ssh this kills
+// the local ssh client (the remote worker may linger until its own
+// --deadline-sec fires). For srun, srun forwards SIGTERM to the remote task
+// step, and if srun itself is SIGKILLed, Slurm's slurmd/slurmstepd cleans up
+// the step on that node so the task does not leak past the launcher's exit.
+//
+// SIGINT/SIGTERM to the launcher while ssh_launch runs: every live child gets
+// SIGTERM (a local worker's whole group), then the launcher exits 128+sig.
 
 #include <string>
 #include <utility>
@@ -44,17 +46,22 @@ namespace acceptance {
 // Which external tool launches each rank's worker process.
 enum class RemoteLauncher { Ssh, Srun };
 
-// Per-rank spec the launcher needs to build one child (ssh or srun).
+// Per-rank spec the launcher needs to build one child (local, ssh or srun).
 struct SshRank {
   int         rank = 0;
   std::string node;             // hostname/FQDN (ssh target, or srun --nodelist)
   std::string remote_command;   // the full remote command as ONE shell string
+  // Non-empty => this rank runs on this host: ssh_launch execv()s local_argv
+  // (argv[0] is the binary path) in a new process group, and `remote_command`
+  // is unused.
+  std::vector<std::string> local_argv;
 };
 
 // Outcome of one launcher child (ssh or srun).
 struct SshChildResult {
   int         rank = 0;
   std::string node;
+  bool        local = false;    // started directly (SshRank::local_argv), not ssh/srun
   bool        launched = false; // fork+exec of the launcher binary succeeded
   bool        exited = false;   // process reaped via normal exit
   bool        timed_out = false;// killed because the overall deadline elapsed
@@ -74,7 +81,9 @@ struct SshLaunchOptions {
 
 // Run all ranks concurrently. Returns one SshChildResult per input rank (same
 // order). Bounded by opts.overall_timeout_sec; overrunning children are
-// SIGTERM->SIGKILL'd and reaped. Never throws; never hangs.
+// SIGTERM->SIGKILL'd and reaped. Never throws; never hangs. Installs its own
+// SIGINT/SIGTERM handler for the duration of the call (see above) and
+// restores the previous one before returning.
 std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
                                        const SshLaunchOptions& opts);
 
@@ -100,41 +109,20 @@ std::vector<std::string> build_launch_argv(const SshRank& r,
 // and escapes embedded single quotes the POSIX way ('\'').
 std::string shell_single_quote(const std::string& v);
 
-// The launcher-side run options that shape the remote WORKER command. This is a
-// pared-down view of main.cc's Options (only the fields build_remote_command
-// needs), lifted here so the builder is linkable/testable outside main.cc.
-struct RemoteCommandParams {
-  std::string policy;            // --policy file (relative => made ABSOLUTE)
-  std::string filter;            // --filter glob (single-quoted in the command)
-  std::string filter_class;      // --filter-class
-  std::string filter_category;   // --filter-category glob (single-quoted)
-  bool        hide_na = false;   // --hide-na
-  std::string kind;              // --kind func|perf|all
-  std::string isolate;           // --isolate value (only if isolate_explicit)
-  bool        isolate_explicit = false;
-  std::string gid;               // --gid index override (ssh workers don't inherit the launcher env)
-  std::string device;            // --device name override (ssh workers don't inherit the launcher env)
-  long        deadline_sec = 0;  // --deadline-sec N (worker self-destruct deadline); 0 => omit the
-                                  // flag entirely, so an older --remote-binary that predates
-                                  // --deadline-sec is not handed a flag it would reject.
-  // Launcher environment variables to forward to the remote worker
-  // (--forward-env), already resolved to concrete name/value pairs and sorted
-  // by name for deterministic output. Empty => no `env ...` prefix is added
-  // (identical command to before env forwarding). Filled for the ssh launcher
-  // only — srun passes the caller's whole environment itself (--export=ALL).
-  std::vector<std::pair<std::string, std::string>> env;
-};
+// Quote one token for the remote shell only when it needs it: a token made
+// solely of [A-Za-z0-9_./:=@%+,-] passes through unchanged, anything else
+// (empty, spaces, globs, quotes, $, ;, ...) is shell_single_quote()d.
+std::string shell_quote_if_needed(const std::string& v);
 
-// Build the remote WORKER command for one rank as ONE shell string. Glob-bearing
-// values (--filter) are single-quoted so the remote shell does not expand them;
-// --policy is resolved to an ABSOLUTE path (the remote worker runs in the ssh
-// home dir, not the launcher's cwd) and single-quoted; other values are simple
-// tokens (host:port, integers, identifiers). Behavior is identical to the former
-// main.cc-local builder.
-std::string build_remote_command(const RemoteCommandParams& p, int rank, int size,
-                                 const std::string& remote_binary,
-                                 const std::string& rendezvous,
-                                 const std::string& vendor);
+// Build the remote WORKER command for one rank as ONE shell string:
+// `[env 'K=V' ...] '<remote_binary>' <args...>`. `args` is the worker argv
+// from build_worker_args() (Launch.hpp); each token is quoted only when it
+// needs it, so a glob such as --filter 'syn2_*' reaches the worker unexpanded.
+// `env` is the resolved --forward-env list (ssh only; empty => no `env`
+// prefix); each "NAME=value" pair is always single-quoted as one token.
+std::string build_remote_command(
+    const std::vector<std::pair<std::string, std::string>>& env,
+    const std::string& remote_binary, const std::vector<std::string>& args);
 
 // Split a comma-separated node list, trimming surrounding whitespace and dropping
 // empty entries ("a, b," -> ["a","b"]; a single host is fine).
