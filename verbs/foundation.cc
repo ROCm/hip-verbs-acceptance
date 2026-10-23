@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -55,11 +56,14 @@ struct OpenedDevice {
   }
 };
 
-// Open the first enumerable device. Returns false on failure and fills `err`.
-// `no_devices` is set true when the host simply has no RDMA hardware (a
-// skip-worthy condition, not a defect) vs. an actual open/enumerate failure on
-// a host that should have a NIC (a real fail).
-bool open_first_device(OpenedDevice& d, std::string& err, bool& no_devices) {
+// Open the device named by ACCEPT_IB_DEVICE (set from --device), else the first
+// enumerable device -- the same override RcConn::open() and the environment
+// report honor, so these tests run on the device the report names. Returns
+// false on failure and fills `err`. `no_devices` is set true when the host
+// simply has no RDMA hardware (a skip-worthy condition, not a defect) vs. an
+// actual open/enumerate failure, or a --device that is not present, on a host
+// that should have a NIC (a real fail).
+bool open_selected_device(OpenedDevice& d, std::string& err, bool& no_devices) {
   no_devices = false;
   int num = 0;
   d.list = ibv_get_device_list(&num);
@@ -76,12 +80,25 @@ bool open_first_device(OpenedDevice& d, std::string& err, bool& no_devices) {
     err = "no RDMA devices present on this host";
     return false;
   }
-  d.ctx = ibv_open_device(d.list[0]);
+  int idx = 0;
+  if (const char* want = std::getenv("ACCEPT_IB_DEVICE");
+      want != nullptr && *want != '\0') {
+    idx = -1;
+    for (int i = 0; i < num; ++i) {
+      const char* name = ibv_get_device_name(d.list[i]);
+      if (name != nullptr && std::strcmp(name, want) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+      err = "IB device '" + std::string(want) + "' not found";
+      return false;
+    }
+  }
+  d.ctx = ibv_open_device(d.list[idx]);
   if (!d.ctx) {
     err = ibvw::errno_reason("ibv_open_device failed");
     return false;
   }
-  const char* n = ibv_get_device_name(d.list[0]);
+  const char* n = ibv_get_device_name(d.list[idx]);
   d.name = n ? n : "<unknown>";
   return true;
 }
@@ -159,16 +176,17 @@ std::string pd_cq_mr_roundtrip(struct ibv_context* ctx,
 
 }  // namespace
 
-// Enumerate devices, open the first, query device + every port, and confirm at
-// least one port is ACTIVE with a non-empty GID table (RCCL cannot bring up any
-// IB transport otherwise). Reads GID entry 0 on the first active port.
+// Enumerate devices, open the selected one (--device, else the first), query
+// device + every port, and confirm at least one port is ACTIVE with a non-empty
+// GID table (RCCL cannot bring up any IB transport otherwise). Reads GID entry 0
+// on the first active port.
 ACCEPT_TEST(vat_device_enum, "verbs/foundation", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_device_attr da;
@@ -206,7 +224,7 @@ ACCEPT_TEST(vat_pd_cq_mr, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   std::vector<unsigned char> buf(64 * 1024);
@@ -233,7 +251,7 @@ ACCEPT_TEST(vat_rc_qp_capacity, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_pd* pd = ibv_alloc_pd(d.ctx);
@@ -303,7 +321,7 @@ ACCEPT_TEST(vat_device_caps_probe, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_device_attr da;
@@ -338,7 +356,7 @@ ACCEPT_TEST(vat_fork_init, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_pd* pd = ibv_alloc_pd(d.ctx);
@@ -392,7 +410,7 @@ ACCEPT_TEST(vat_relaxed_ordering, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_pd* pd = ibv_alloc_pd(d.ctx);
@@ -437,7 +455,7 @@ ACCEPT_TEST(vat_reg_mr_latency, "verbs/foundation", Topology::Single,
   OpenedDevice d;
   std::string err;
   bool no_devices = false;
-  if (!open_first_device(d, err, no_devices))
+  if (!open_selected_device(d, err, no_devices))
     return no_devices ? skip(err) : fail(err);
 
   struct ibv_pd* pd = ibv_alloc_pd(d.ctx);
