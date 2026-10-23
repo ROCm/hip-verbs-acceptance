@@ -542,7 +542,7 @@ ACCEPT_TEST(Device_P2P_KernelAccess_AllPairs, "hip/device", Topology::Single,
 ACCEPT_TEST(Device_Attr_Probe, "hip/device", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = gpu();
   HIP_CHECK(hipSetDevice(dev));
 
   ProbedAttrs attrs;
@@ -560,7 +560,7 @@ ACCEPT_TEST(Device_Attr_Probe, "hip/device", Topology::Single, Kind::Functional,
 ACCEPT_TEST(Hdp_Flush_Ordering, "hip/device", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = gpu();
   hipDeviceProp_t prop{};
   HIP_CHECK(hipGetDeviceProperties(&prop, dev));
   if (!is_pre_gfx90a(prop.gcnArchName))
@@ -615,7 +615,7 @@ ACCEPT_TEST(DeviceSetLimit_StackSize, "hip/device", Topology::Single,
 ACCEPT_TEST(PointerGetAttributes_DeviceVsHost, "hip/device", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = gpu();
   HIP_CHECK(hipSetDevice(dev));
   const size_t bytes = 4096;
 
@@ -723,7 +723,7 @@ ACCEPT_TEST(DriverEntryPoint_Resolve, "hip/device", Topology::Single,
 ACCEPT_TEST(Device_Reset_Mgmt, "hip/devreset", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = gpu();
   HIP_CHECK(hipSetDevice(dev));
 
   size_t total = 0;
@@ -844,7 +844,7 @@ ACCEPT_TEST(Texture_Object_Lifecycle, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Mem_Advise_Info, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = gpu();
   HIP_CHECK(hipSetDevice(dev));
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);

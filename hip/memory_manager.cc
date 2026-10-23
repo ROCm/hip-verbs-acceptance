@@ -702,7 +702,7 @@ std::string run_reclaim_cycles(int sock, size_t size,
       return std::string("hipMemCreate: ") + hipGetErrorString(create_err);
 
     void* va = nullptr;
-    std::string error = vmm_map_and_touch(handle, size, 0, &va);
+    std::string error = vmm_map_and_touch(handle, size, gpu(), &va);
     if (!error.empty()) {
       (void)hipMemRelease(handle);
       return error;
@@ -936,7 +936,7 @@ ACCEPT_TEST(Vmm_GPUDirectRdmaVmm_Attribute, "hip/memmgr", Topology::Single,
   bool queryable = true;
   for (auto pass : loop) {
     queryable = query_device_attr(
-        0, hipDeviceAttributeGPUDirectRDMAWithHipVMMSupported, &rdma_vmm);
+        gpu(), hipDeviceAttributeGPUDirectRDMAWithHipVMMSupported, &rdma_vmm);
     if (!queryable) break;
   }
   if (!queryable) {
@@ -947,11 +947,11 @@ ACCEPT_TEST(Vmm_GPUDirectRdmaVmm_Attribute, "hip/memmgr", Topology::Single,
   }
 
   int vmm = 0, dmabuf = 0;
-  if (!query_device_attr(0, hipDeviceAttributeVirtualMemoryManagementSupported,
-                         &vmm))
+  if (!query_device_attr(gpu(),
+                         hipDeviceAttributeVirtualMemoryManagementSupported, &vmm))
     return fail("hipDeviceAttributeVirtualMemoryManagementSupported query failed");
 
-  if (!query_device_attr(0, hipDeviceAttributeDmaBufSupported, &dmabuf))
+  if (!query_device_attr(gpu(), hipDeviceAttributeDmaBufSupported, &dmabuf))
     return fail("hipDeviceAttributeDmaBufSupported query failed");
 
   const int expected = (vmm != 0 && dmabuf != 0) ? 1 : 0;

@@ -570,6 +570,12 @@ int do_exec(const Options& opt) {
     return 2;
   }
 
+  // Tests that fork before their first HIP call select gpu() themselves: a
+  // child inheriting an initialized HIP runtime cannot use it.
+  const bool forks_before_hip = meta->category == "hip/ipc" ||
+                                meta->id == "Vmm_Reclaim_Cycles_CrossProcess";
+  if (!forks_before_hip) make_gpu_current(gpu());
+
   LoopbackBootstrap boot;
   TestContext ctx;
   ctx.rank = boot.rank();
@@ -1361,8 +1367,7 @@ int run(const Options& opt) {
       return do_list();
 
     case Mode::Exec:
-      // The parent published its resolved pair; no need to detect() again.
-      make_gpu_current(gpu());
+      // The parent published its resolved pair; do_exec makes gpu() current.
       return do_exec(opt);
 
     case Mode::Worker:
