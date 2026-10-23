@@ -950,6 +950,41 @@ else
   pass "worker SIGTERM kills isolated test (child $O_CHILD and grandchild $O_GC are dead)"
 fi
 
+# ===========================================================================
+# Check (p): Ctrl-C on a --local-ranks launcher takes its workers down. Both
+# workers hang in syn2_hang, in their own process groups (outside the
+# terminal's foreground group), so only the launcher's handler can reach
+# them. SIGINT the launcher once both workers exist; all three must be gone.
+# ===========================================================================
+ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang --vendor synthetic \
+    --policy "$POLICY/synthetic.csv" >"$TMP/p.log" 2>&1 &
+P_LAUNCHER=$!
+P_WORKERS=""
+for _ in $(seq 1 100); do
+  P_WORKERS="$(pgrep -P "$P_LAUNCHER" 2>/dev/null | xargs)"
+  [ "$(echo "$P_WORKERS" | wc -w)" -eq 2 ] && break
+  sleep 0.05
+done
+kill -INT "$P_LAUNCHER" 2>/dev/null
+wait "$P_LAUNCHER" 2>/dev/null
+P_ALIVE=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  P_ALIVE=""
+  for p in $P_WORKERS; do kill -0 "$p" 2>/dev/null && P_ALIVE="$P_ALIVE $p"; done
+  [ -z "$P_ALIVE" ] && break
+  sleep 0.2
+done
+if [ "$(echo "$P_WORKERS" | wc -w)" -ne 2 ]; then
+  fail "--local-ranks Ctrl-C cleanup" "setup: workers '$P_WORKERS' not seen"
+  cat "$TMP/p.log"
+  [ -n "$P_WORKERS" ] && kill -9 $P_WORKERS 2>/dev/null
+elif [ -n "$P_ALIVE" ]; then
+  fail "--local-ranks Ctrl-C cleanup" "workers still alive after SIGINT:$P_ALIVE"
+  kill -9 $P_ALIVE 2>/dev/null
+else
+  pass "--local-ranks Ctrl-C cleanup (workers $P_WORKERS are gone)"
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------

@@ -1019,10 +1019,10 @@ bool load_rank_results(const std::string& path, ReportInputs& in) {
 // longer reach pid0/pid1 -- previously the kernel delivered the terminal's
 // SIGINT to the whole foreground group, workers included, for free. The
 // handler itself must be async-signal-safe: kill() and _exit() are the only
-// calls it makes, both signal-safe; the pids are written once (after fork,
-// before any signal can reasonably be expected) to plain ints, which is as
-// safe as this gets without a pipe-based self-pipe trick that this small
-// cleanup does not warrant.
+// calls it makes. do_local_ranks blocks SIGINT/SIGTERM from before the forks
+// until both pids are published and each worker leads its group, so the
+// handler never sees a forked but unrecorded worker. A pid is cleared once
+// reaped, so a reused pid is never signalled.
 volatile pid_t g_local_rank_pid0 = 0;
 volatile pid_t g_local_rank_pid1 = 0;
 
@@ -1083,11 +1083,27 @@ int do_local_ranks(const Options& opt) {
     ::rmdir(tmpdir.c_str());
   };
 
+  // Hold SIGINT/SIGTERM from the forks until the pids are published; one that
+  // arrives meanwhile is handled when the mask is restored below.
+  sigset_t cleanup_sigs, old_mask;
+  ::sigemptyset(&cleanup_sigs);
+  ::sigaddset(&cleanup_sigs, SIGINT);
+  ::sigaddset(&cleanup_sigs, SIGTERM);
+  ::sigprocmask(SIG_BLOCK, &cleanup_sigs, &old_mask);
+
   // Spawn a worker for `rank` with its results path.
   auto spawn = [&](int rank, const std::string& rpath) -> pid_t {
     const pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+      // Lead a new process group before exec, so kill(-pid) reaches this
+      // worker as soon as its pid is published (the parent also calls
+      // setpgid; whichever runs first wins). Then drop this launcher's
+      // handlers and restore the signal mask the worker should start with.
+      ::setpgid(0, 0);
+      ::signal(SIGINT, SIG_DFL);
+      ::signal(SIGTERM, SIG_DFL);
+      ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
       // ---- child: execv self in --worker mode ----
       std::vector<std::string> args = {
         "/proc/self/exe", "--worker",
@@ -1116,23 +1132,25 @@ int do_local_ranks(const Options& opt) {
       ::execv(self, cargv.data());
       ::_exit(127);  // exec failed
     }
+    ::setpgid(pid, pid);
     return pid;
   };
 
   const pid_t pid0 = spawn(0, r0_path);
   const pid_t pid1 = spawn(1, r1_path);
+  // Publish pids for on_local_ranks_signal, then take pending signals.
+  g_local_rank_pid0 = pid0;
+  g_local_rank_pid1 = pid1;
+  ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
   if (pid0 < 0 || pid1 < 0) {
     std::fprintf(stderr, "error: fork failed launching workers\n");
     if (pid0 > 0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, nullptr, 0); }
     if (pid1 > 0) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, nullptr, 0); }
+    g_local_rank_pid0 = 0;
+    g_local_rank_pid1 = 0;
     cleanup();
     return 3;
   }
-  // Publish pids for on_local_ranks_signal: both workers are live from
-  // here on, so Ctrl-C/SIGTERM from this point must clean them up.
-  g_local_rank_pid0 = pid0;
-  g_local_rank_pid1 = pid1;
-
   // Overall-wait guard: poll for both children, bounded by a generous deadline
   // (rendezvous timeout is ~30s per side; give headroom). On timeout, SIGKILL
   // both and error out — NOTHING hangs forever.
@@ -1147,11 +1165,13 @@ int do_local_ranks(const Options& opt) {
       const pid_t r = waitpid_eintr(pid0, &st0, WNOHANG);
       if (r == pid0) done0 = true;
       else if (r < 0) { done0 = true; st0 = -1; }
+      if (done0) g_local_rank_pid0 = 0;
     }
     if (!done1) {
       const pid_t r = waitpid_eintr(pid1, &st1, WNOHANG);
       if (r == pid1) done1 = true;
       else if (r < 0) { done1 = true; st1 = -1; }
+      if (done1) g_local_rank_pid1 = 0;
     }
     if (done0 && done1) break;
     if ((monotonic_ms() - t0_ms) / 1000 >= overall_sec) {
@@ -1167,6 +1187,8 @@ int do_local_ranks(const Options& opt) {
                  "(possible rendezvous hang)\n", overall_sec);
     if (!done0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, &st0, 0); }
     if (!done1) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, &st1, 0); }
+    g_local_rank_pid0 = 0;
+    g_local_rank_pid1 = 0;
     cleanup();
     return 4;  // bootstrap/launch failure
   }
