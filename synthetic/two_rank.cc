@@ -12,7 +12,10 @@
 // consensus here (§4 non-goal).
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+
+#include <unistd.h>
 
 #include "common/Bootstrap.hpp"
 #include "common/TestRegistry.hpp"
@@ -56,6 +59,23 @@ ACCEPT_TEST(syn2_r0pass_r1passive, "synthetic", Topology::TwoNode,
   if (ctx.size != 2) return skip("needs 2 ranks");
   if (ctx.rank == 0) return pass();
   return none_();
+}
+
+// syn2_hang: both ranks spin forever (never call pass()/fail()). Opt-in via
+// ACCEPT_SYN_HANG=1 -- selected by default it would otherwise hang any run
+// that includes it, which is the opposite of a harmless self-test fixture.
+// Exercises the worker-side --deadline-sec watchdog: TwoNode tests
+// run IN-PROCESS on the worker's main thread (Runner::run_in_process has no
+// per-test timeout, unlike the isolated --exec path), so nothing but the
+// worker's own deadline watchdog can ever end this.
+ACCEPT_TEST(syn2_hang, "synthetic", Topology::TwoNode, Kind::Functional, 30) {
+  if (ctx.size != 2) return skip("needs 2 ranks");
+  if (std::getenv("ACCEPT_SYN_HANG") == nullptr) {
+    return skip("ACCEPT_SYN_HANG not set");
+  }
+  for (;;) {
+    ::sleep(1);
+  }
 }
 
 }  // namespace acceptance

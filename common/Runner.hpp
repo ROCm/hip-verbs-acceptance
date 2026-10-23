@@ -104,4 +104,10 @@ class Runner {
   RunnerOptions opts_;
 };
 
+// Send `sig` to the process group of the isolated test child this process is
+// currently waiting on, if any. That child leads its own group, so killing the
+// worker's group does not reach it. Async-signal-safe (an atomic load and
+// kill()), for the worker's deadline watchdog and its SIGTERM/SIGINT handler.
+void kill_active_isolated_test(int sig);
+
 }  // namespace acceptance

@@ -14,4 +14,5 @@ syn_na,NA,,,,not applicable on synthetic vendor
 syn2_barrier,MUST_PASS,,,,
 syn2_r0fail_r1pass,MUST_PASS,,,,
 syn2_r0pass_r1passive,MUST_PASS,,,,
+syn2_hang,MUST_PASS,,,,inert unless ACCEPT_SYN_HANG=1; exercises --deadline-sec
 # syn_unclassified intentionally omitted -> UNCLASSIFIED

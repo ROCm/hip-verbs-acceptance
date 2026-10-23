@@ -351,7 +351,11 @@ fi
 # ===========================================================================
 REP_F="$TMP/rep2.json"
 LOG_F="$TMP/twonode.log"
-run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_*' --vendor synthetic \
+# 'syn2_[!h]*' excludes syn2_hang: that test is ACCEPT_SYN_HANG-gated (check
+# (q) below exercises it on its own, with the env var set) and would
+# otherwise show up here as an unrelated MUST_PASS/skip gate-fail row since
+# ACCEPT_SYN_HANG is not set in this invocation.
+run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_[!h]*' --vendor synthetic \
         --policy "$POLICY/synthetic.csv" --report "$REP_F"
 RC_F=$RC
 
@@ -1009,6 +1013,177 @@ PYEOF
     fail "--filter-class report selection" "$(cat "$TMP/p_out.txt")"
     cat "$LOG_P1" "$LOG_P2"
   fi
+fi
+
+# ===========================================================================
+# Check (q): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
+# makes both --local-ranks workers spin forever in-process (a TwoNode test
+# has no per-test timeout, see Runner::run_in_process). --launch-timeout 3
+# gives each worker --deadline-sec 13 (launch_timeout+10); its own watchdog
+# thread must SIGKILL the worker's process group well before the launcher's
+# own 90s overall-wait bound, so the launcher observes an abnormal child exit
+# and returns 4. Bounded with `timeout` so a regression here fails the check
+# instead of hanging the whole selftest; the pgrep below is scoped to THIS
+# worktree's binary path (not a bare 'hva --worker') because other agents run
+# their own hva builds concurrently on this host.
+# ===========================================================================
+LOG_Q="$TMP/hang.log"
+timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang \
+    --launch-timeout 3 --vendor synthetic --policy "$POLICY/synthetic.csv" \
+    >"$LOG_Q" 2>&1
+RC_Q=$?
+
+# Scoped stray-process check. do_local_ranks execv's "/proc/self/exe" with
+# that LITERAL string as argv[0] (so the worker's cmdline does NOT contain
+# $BIN's path -- `pgrep -f "$BIN --worker"` would never match). Instead:
+# shortlist candidates with a plain '--worker' cmdline match, then keep only
+# the ones whose /proc/<pid>/exe resolves to THIS worktree's built binary.
+# That is the scoping this host actually needs: other agents build and run
+# their OWN hva binaries concurrently (different real path => filtered out),
+# so this never mistakes their workers for a leak from this run.
+BIN_REAL="$(readlink -f "$BIN" 2>/dev/null || printf '%s' "$BIN")"
+stray_workers() {
+  local pid exe_real out=""
+  for pid in $(pgrep -f -- '--worker' 2>/dev/null); do
+    exe_real="$(readlink -f "/proc/$pid/exe" 2>/dev/null)" || continue
+    [ "$exe_real" = "$BIN_REAL" ] && out="$out $pid"
+  done
+  printf '%s\n' "$out" | xargs -n1 2>/dev/null
+}
+
+if [ "$RC_Q" -eq 124 ]; then
+  fail "worker deadline watchdog" \
+       "run HUNG (timeout tripped at 30s); watchdog did not fire"
+  cat "$LOG_Q"
+  # Best-effort: do not leave the hang running for the rest of the suite.
+  STRAY="$(stray_workers)"
+  [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
+elif [ "$RC_Q" -ne 4 ]; then
+  fail "worker deadline watchdog" "exit=$RC_Q expected 4 (abnormal worker exit)"
+  cat "$LOG_Q"
+  STRAY="$(stray_workers)"
+  [ -n "$STRAY" ] && kill -9 $STRAY 2>/dev/null
+else
+  # Give init a moment to reap the SIGKILL'd workers before the stray check.
+  STRAY=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    STRAY="$(stray_workers)"
+    [ -z "$STRAY" ] && break
+    sleep 0.3
+  done
+  if [ -z "$STRAY" ]; then
+    pass "worker deadline watchdog (exit 4, no stray hva --worker processes)"
+  else
+    fail "worker deadline watchdog" "stray worker process(es) remain: $STRAY"
+    kill -9 $STRAY 2>/dev/null
+  fi
+fi
+
+# ===========================================================================
+# Check (r): SIGTERM to a launcher-spawned worker also kills its active
+# isolated test. syn_spawn_grandchild_hang runs isolated, in its own process
+# group, and forks a grandchild that writes its pid to ACCEPT_GC_PIDFILE. Once
+# that file exists, SIGTERM the worker (what --local-ranks sends on Ctrl-C).
+# The worker, its isolated child and the grandchild must all be gone; before
+# the fix the child's group outlived the worker. --deadline-sec 60 arms the
+# worker's handlers without the deadline firing during the check. The
+# fixture's own 2s timeout is the race to beat: the pidfile appears in
+# milliseconds.
+# ===========================================================================
+R_PIDFILE="$TMP/r_gc.pid"
+LOG_R="$TMP/r.log"
+rm -f "$R_PIDFILE"
+ACCEPT_GC_PIDFILE="$R_PIDFILE" "$BIN" --worker --rank 0 --size 1 \
+    --results-out "$TMP/r_results.kv" --filter syn_spawn_grandchild_hang \
+    --isolate all --deadline-sec 60 --vendor synthetic \
+    --policy "$POLICY/synthetic.csv" >"$LOG_R" 2>&1 &
+W_PID=$!
+for _ in $(seq 1 50); do [ -s "$R_PIDFILE" ] && break; sleep 0.02; done
+R_CHILD="$(pgrep -P "$W_PID" 2>/dev/null | head -n1)"
+R_GC="$(head -n1 "$R_PIDFILE" 2>/dev/null | tr -dc '0-9')"
+kill -TERM "$W_PID" 2>/dev/null
+wait "$W_PID" 2>/dev/null
+R_ALIVE=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  R_ALIVE=""
+  for p in $R_CHILD $R_GC; do kill -0 "$p" 2>/dev/null && R_ALIVE="$R_ALIVE $p"; done
+  [ -z "$R_ALIVE" ] && break
+  sleep 0.2
+done
+if [ -z "$R_CHILD" ] || [ -z "$R_GC" ]; then
+  fail "worker SIGTERM kills isolated test" \
+       "setup: isolated child '$R_CHILD' / grandchild '$R_GC' not seen before SIGTERM"
+  cat "$LOG_R"
+  [ -n "$R_GC" ] && kill -9 "$R_GC" 2>/dev/null
+elif [ -n "$R_ALIVE" ]; then
+  fail "worker SIGTERM kills isolated test" "still alive after worker SIGTERM:$R_ALIVE"
+  kill -9 $R_ALIVE 2>/dev/null
+else
+  pass "worker SIGTERM kills isolated test (child $R_CHILD and grandchild $R_GC are dead)"
+fi
+
+# ===========================================================================
+# Check (s): Ctrl-C on a --local-ranks launcher takes its workers down. Both
+# workers hang in syn2_hang, in their own process groups (outside the
+# terminal's foreground group), so only the launcher's handler can reach
+# them. SIGINT the launcher once both workers exist; all three must be gone.
+# ===========================================================================
+ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang --vendor synthetic \
+    --policy "$POLICY/synthetic.csv" >"$TMP/s.log" 2>&1 &
+S_LAUNCHER=$!
+S_WORKERS=""
+for _ in $(seq 1 100); do
+  S_WORKERS="$(pgrep -P "$S_LAUNCHER" 2>/dev/null | xargs)"
+  [ "$(echo "$S_WORKERS" | wc -w)" -eq 2 ] && break
+  sleep 0.05
+done
+kill -INT "$S_LAUNCHER" 2>/dev/null
+wait "$S_LAUNCHER" 2>/dev/null
+S_ALIVE=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S_ALIVE=""
+  for p in $S_WORKERS; do kill -0 "$p" 2>/dev/null && S_ALIVE="$S_ALIVE $p"; done
+  [ -z "$S_ALIVE" ] && break
+  sleep 0.2
+done
+if [ "$(echo "$S_WORKERS" | wc -w)" -ne 2 ]; then
+  fail "--local-ranks Ctrl-C cleanup" "setup: workers '$S_WORKERS' not seen"
+  cat "$TMP/s.log"
+  [ -n "$S_WORKERS" ] && kill -9 $S_WORKERS 2>/dev/null
+elif [ -n "$S_ALIVE" ]; then
+  fail "--local-ranks Ctrl-C cleanup" "workers still alive after SIGINT:$S_ALIVE"
+  kill -9 $S_ALIVE 2>/dev/null
+else
+  pass "--local-ranks Ctrl-C cleanup (workers $S_WORKERS are gone)"
+fi
+
+# ===========================================================================
+# Check (t): the deadline kill does not wait on a stalled stderr. The worker's
+# stderr is a FIFO whose reader never reads, pre-filled so any write blocks.
+# Rank 1 retries connecting to a closed rendezvous port; --deadline-sec 1
+# must still end it in about a second. Before the fix, the watchdog's
+# fprintf blocked and the worker ran until the outer `timeout`.
+# ===========================================================================
+T_FIFO="$TMP/t.fifo"
+mkfifo "$T_FIFO"
+sleep 30 <"$T_FIFO" &
+T_READER=$!
+exec 3>"$T_FIFO"
+head -c 65536 /dev/zero >&3
+T_T0=$(date +%s)
+timeout 15 "$BIN" --worker --rank 1 --size 2 --rendezvous 127.0.0.1:1 \
+    --results-out "$TMP/t.kv" --deadline-sec 1 --filter syn2_barrier \
+    --vendor synthetic 2>&3
+RC_T=$?
+T_ELAPSED=$(( $(date +%s) - T_T0 ))
+exec 3>&-
+kill "$T_READER" 2>/dev/null
+wait "$T_READER" 2>/dev/null
+if [ "$RC_T" -eq 124 ] || [ "$T_ELAPSED" -gt 5 ]; then
+  fail "deadline kill with stalled stderr" \
+       "exit=$RC_T after ${T_ELAPSED}s (watchdog blocked on stderr?)"
+else
+  pass "deadline kill with stalled stderr (exit $RC_T after ${T_ELAPSED}s)"
 fi
 
 # ---------------------------------------------------------------------------

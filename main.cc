@@ -22,6 +22,7 @@
 #include <memory>
 #include <sstream>
 #include <system_error>
+#include <thread>
 
 #include <fnmatch.h>
 #include <signal.h>
@@ -113,6 +114,12 @@ struct Options {
   std::string ssh_user;             // --ssh-user U (ssh -l U)
   std::string remote_binary;        // --remote-binary PATH (default /proc/self/exe)
   long        launch_timeout = 120; // --launch-timeout SEC (overall deadline)
+
+  // Worker-only self-destruct deadline. Set by the launcher
+  // (do_nodes / do_local_ranks) on every worker it spawns; absent when a
+  // worker is run directly by a user. 0 = disabled (default).
+  long        deadline_sec = 0;     // --deadline-sec SEC
+
   RemoteLauncher remote_launcher = RemoteLauncher::Ssh;  // --remote-launcher ssh|srun
 
   // Env forwarding to ssh workers. ON by default: a trailing '*' in an
@@ -208,7 +215,15 @@ void print_usage(std::FILE* out) {
     "  --rank <n>            This worker's rank\n"
     "  --size <n>            Total rank count (1 or 2)\n"
     "  --rendezvous H:P      Rank-0 listener host:port for the socket bootstrap\n"
-    "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n",
+    "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n"
+    "  --deadline-sec <s>    Worker self-destruct deadline. Set automatically by\n"
+    "                        the launcher (--nodes / --local-ranks) to\n"
+    "                        launch-timeout+10 so a worker whose launcher gave\n"
+    "                        up (killed its ssh client / died) does not keep\n"
+    "                        running. Omit when invoking --worker by hand; a\n"
+    "                        worker started this way behaves exactly as before\n"
+    "                        this flag existed. Older --remote-binary builds\n"
+    "                        predate this flag and will reject it (exit 2).\n",
     kHarnessVersion);
 }
 
@@ -370,6 +385,13 @@ int parse_args(int argc, char** argv, Options& opt) {
       if (!take_value(argc, argv, i, "--remote-binary", opt.remote_binary)) return 2;
     } else if (a == "--launch-timeout") {
       if (!take_int(argc, argv, i, "--launch-timeout", opt.launch_timeout)) return 2;
+    } else if (a == "--deadline-sec") {
+      if (!take_int(argc, argv, i, "--deadline-sec", opt.deadline_sec)) return 2;
+      if (opt.deadline_sec <= 0) {
+        std::fprintf(stderr, "error: --deadline-sec must be > 0 (got %ld)\n",
+                     opt.deadline_sec);
+        return 2;
+      }
     } else if (a == "--forward-env") {
       if (!take_value(argc, argv, i, "--forward-env", opt.forward_env)) return 2;
       opt.forward_env_explicit = true;
@@ -787,7 +809,89 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
   return port > 0 && port <= 65535;
 }
 
+// Worker-only process-group + deadline watchdog. Only called when
+// --deadline-sec was passed (i.e. this worker was spawned by a launcher); a
+// worker invoked directly by a user never calls this, so its behavior is
+// unchanged from before this feature existed.
+//
+// setpgid(0,0) makes this worker the leader of a FRESH process group,
+// distinct from whatever group it inherited (the launcher's, or a
+// --local-ranks parent's terminal foreground group). That lets the watchdog
+// reach this worker with a single kill(-getpgrp()) without also hitting the
+// launcher or sibling workers. A currently-running isolated --exec test
+// child is in ITS OWN group (Runner::run_isolated() has it call
+// setpgid(0,0), so the per-test timeout's kill(-child_pid) stays scoped to
+// that child and its descendants), so the watchdog and on_worker_signal
+// kill that group first, via kill_active_isolated_test(). This watchdog is a
+// backstop for everything the per-test timeout cannot reach — most importantly a
+// TwoNode test, which runs in-process on the worker's own thread with no
+// per-test timeout at all (Runner::run_in_process has none), so a peer that
+// never arrives/responds can otherwise block this thread forever.
+//
+// Implemented as a plain background thread (the plan's other option, a
+// timer_create() signal, would need the handler body to be
+// async-signal-safe — no fprintf, no std::thread, nothing that touches
+// locks). A thread has none of those constraints, so the deadline check and
+// the diagnostic print are ordinary code.
+//
+// SIGTERM/SIGINT for a launcher-spawned worker (the --local-ranks launcher
+// sends SIGTERM on Ctrl-C): kill the active isolated test's group, then this
+// worker's. Only async-signal-safe calls.
+void on_worker_signal(int) {
+  kill_active_isolated_test(SIGKILL);
+  ::kill(-::getpgrp(), SIGKILL);
+}
+
+void arm_worker_deadline(long deadline_sec) {
+  // Under ssh the worker is already its own session (and so process-group)
+  // leader; setpgid() on a session leader always fails with EPERM, and the
+  // group is already correctly scoped, so only call it when needed.
+  if (::getpgrp() != ::getpid() && ::setpgid(0, 0) != 0) {
+    std::fprintf(stderr,
+                 "warning: setpgid(0,0) failed: %s (deadline watchdog still "
+                 "armed; kill(-getpgrp()) may reach a wider group than "
+                 "intended on expiry)\n",
+                 std::strerror(errno));
+  }
+  {
+    struct sigaction sa {};
+    sa.sa_handler = on_worker_signal;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    ::sigaction(SIGINT, &sa, nullptr);
+    ::sigaction(SIGTERM, &sa, nullptr);
+  }
+  std::thread([deadline_sec]() {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(deadline_sec);
+    while (std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    // Write the diagnostic line BEFORE killing: kill(-getpgrp(), SIGKILL)
+    // below also kills THIS process (and this thread) immediately, so
+    // nothing queued after that call would ever run. Best effort only: a
+    // stalled stderr pipe or a stuck stdio lock must not delay the kill, so
+    // write(2) (no stdio lock) runs on its own thread, and the kill goes
+    // ahead after a short wait whether or not it finished.
+    std::string msg =
+        "error: worker deadline (" + std::to_string(deadline_sec) +
+        "s) exceeded without the run completing -- the launcher gave up (or "
+        "never checked back in); killing this worker's process group\n";
+    std::thread([msg = std::move(msg)]() {
+      (void)!::write(STDERR_FILENO, msg.data(), msg.size());
+    }).detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    kill_active_isolated_test(SIGKILL);
+    ::kill(-::getpgrp(), SIGKILL);
+  }).detach();
+}
+
 int do_worker(const Options& opt) {
+  // Arm the deadline watchdog FIRST, before any potentially-blocking call
+  // (bootstrap rendezvous, policy load, the test loop itself) — it is exactly
+  // those blocking calls the watchdog exists to bound.
+  if (opt.deadline_sec > 0) arm_worker_deadline(opt.deadline_sec);
+
   if (opt.results_out.empty()) {
     std::fprintf(stderr, "error: --worker requires --results-out\n");
     return 2;
@@ -915,7 +1019,46 @@ bool load_rank_results(const std::string& path, ReportInputs& in) {
   return load_rank_results_text(buf.str(), in, /*force_rank=*/-1);
 }
 
+// SIGINT/SIGTERM cleanup for --local-ranks. Workers now always get
+// --deadline-sec, which makes them call setpgid(0,0) at startup (see
+// arm_worker_deadline) and leave this launcher's terminal foreground process
+// group. Without this handler, Ctrl-C (or `kill` on the launcher) would no
+// longer reach pid0/pid1 -- previously the kernel delivered the terminal's
+// SIGINT to the whole foreground group, workers included, for free. The
+// handler itself must be async-signal-safe: kill() and _exit() are the only
+// calls it makes. do_local_ranks blocks SIGINT/SIGTERM from before the forks
+// until both pids are published and each worker leads its group, so the
+// handler never sees a forked but unrecorded worker. A pid is cleared once
+// reaped, so a reused pid is never signalled.
+volatile pid_t g_local_rank_pid0 = 0;
+volatile pid_t g_local_rank_pid1 = 0;
+
+void on_local_ranks_signal(int sig) {
+  // Negative pid == "the process group led by this pid". Each worker leads
+  // its own group (setpgid(0,0) in arm_worker_deadline). SIGTERM, not
+  // SIGKILL: the worker's on_worker_signal then kills its active isolated
+  // test's group (which this group does not include) before its own. A
+  // worker that has not installed that handler yet has no isolated test, and
+  // the default SIGTERM action ends it.
+  const pid_t p0 = g_local_rank_pid0;
+  const pid_t p1 = g_local_rank_pid1;
+  if (p0 > 0) ::kill(-p0, SIGTERM);
+  if (p1 > 0) ::kill(-p1, SIGTERM);
+  ::_exit(128 + sig);
+}
+
 int do_local_ranks(const Options& opt) {
+  // Installed before any worker is forked so there is no window where a
+  // Ctrl-C/SIGTERM would fall back to the default (no-cleanup) action.
+  {
+    struct sigaction sa {};
+    sa.sa_handler = on_local_ranks_signal;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    ::sigaction(SIGINT, &sa, nullptr);
+    ::sigaction(SIGTERM, &sa, nullptr);
+  }
+
   if (opt.local_ranks != 2) {
     std::fprintf(stderr,
                  "error: --local-ranks supports exactly 2 (got %d)\n",
@@ -947,11 +1090,27 @@ int do_local_ranks(const Options& opt) {
     ::rmdir(tmpdir.c_str());
   };
 
+  // Hold SIGINT/SIGTERM from the forks until the pids are published; one that
+  // arrives meanwhile is handled when the mask is restored below.
+  sigset_t cleanup_sigs, old_mask;
+  ::sigemptyset(&cleanup_sigs);
+  ::sigaddset(&cleanup_sigs, SIGINT);
+  ::sigaddset(&cleanup_sigs, SIGTERM);
+  ::sigprocmask(SIG_BLOCK, &cleanup_sigs, &old_mask);
+
   // Spawn a worker for `rank` with its results path.
   auto spawn = [&](int rank, const std::string& rpath) -> pid_t {
     const pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+      // Lead a new process group before exec, so kill(-pid) reaches this
+      // worker as soon as its pid is published (the parent also calls
+      // setpgid; whichever runs first wins). Then drop this launcher's
+      // handlers and restore the signal mask the worker should start with.
+      ::setpgid(0, 0);
+      ::signal(SIGINT, SIG_DFL);
+      ::signal(SIGTERM, SIG_DFL);
+      ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
       // ---- child: execv self in --worker mode ----
       std::vector<std::string> args = {
         "/proc/self/exe", "--worker",
@@ -961,6 +1120,11 @@ int do_local_ranks(const Options& opt) {
         "--results-out", rpath,
         // Launcher reconciles; silence worker live streaming.
         "--quiet",
+        // Bound the worker's own lifetime so it self-destructs if this
+        // launcher dies before it gets a chance to kill it (see
+        // on_local_ranks_signal for the SIGINT/SIGTERM path, and the
+        // deadline-exceeded path below for the "launcher hung" path).
+        "--deadline-sec", std::to_string(opt.launch_timeout + 10),
       };
       if (!opt.filter.empty())  { args.push_back("--filter");  args.push_back(opt.filter); }
       if (!opt.kind.empty())    { args.push_back("--kind");    args.push_back(opt.kind); }
@@ -987,19 +1151,25 @@ int do_local_ranks(const Options& opt) {
       ::execv(self, cargv.data());
       ::_exit(127);  // exec failed
     }
+    ::setpgid(pid, pid);
     return pid;
   };
 
   const pid_t pid0 = spawn(0, r0_path);
   const pid_t pid1 = spawn(1, r1_path);
+  // Publish pids for on_local_ranks_signal, then take pending signals.
+  g_local_rank_pid0 = pid0;
+  g_local_rank_pid1 = pid1;
+  ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
   if (pid0 < 0 || pid1 < 0) {
     std::fprintf(stderr, "error: fork failed launching workers\n");
     if (pid0 > 0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, nullptr, 0); }
     if (pid1 > 0) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, nullptr, 0); }
+    g_local_rank_pid0 = 0;
+    g_local_rank_pid1 = 0;
     cleanup();
     return 3;
   }
-
   // Overall-wait guard: poll for both children, bounded by a generous deadline
   // (rendezvous timeout is ~30s per side; give headroom). On timeout, SIGKILL
   // both and error out — NOTHING hangs forever.
@@ -1014,11 +1184,13 @@ int do_local_ranks(const Options& opt) {
       const pid_t r = waitpid_eintr(pid0, &st0, WNOHANG);
       if (r == pid0) done0 = true;
       else if (r < 0) { done0 = true; st0 = -1; }
+      if (done0) g_local_rank_pid0 = 0;
     }
     if (!done1) {
       const pid_t r = waitpid_eintr(pid1, &st1, WNOHANG);
       if (r == pid1) done1 = true;
       else if (r < 0) { done1 = true; st1 = -1; }
+      if (done1) g_local_rank_pid1 = 0;
     }
     if (done0 && done1) break;
     if ((monotonic_ms() - t0_ms) / 1000 >= overall_sec) {
@@ -1034,6 +1206,8 @@ int do_local_ranks(const Options& opt) {
                  "(possible rendezvous hang)\n", overall_sec);
     if (!done0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, &st0, 0); }
     if (!done1) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, &st1, 0); }
+    g_local_rank_pid0 = 0;
+    g_local_rank_pid1 = 0;
     cleanup();
     return 4;  // bootstrap/launch failure
   }
@@ -1163,6 +1337,12 @@ int do_nodes(const Options& opt) {
   rcp.isolate_explicit = opt.isolate_explicit;
   rcp.gid             = opt.gid;
   rcp.device          = opt.device;
+  // Bound the remote worker to the SAME deadline this launcher already
+  // uses for its own ssh wait (launch_timeout), plus headroom so the
+  // launcher's own timeout/kill always fires first in the common case; the
+  // worker watchdog is the backstop for when it doesn't (launcher killed /
+  // host died before it could even try).
+  rcp.deadline_sec    = opt.launch_timeout + 10;
   // --forward-env: ssh launcher only. srun passes the launcher's whole
   // environment itself (--export=ALL), so an `env` prefix would be redundant;
   // parse_args already rejected the explicit flags with srun.

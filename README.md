@@ -86,6 +86,16 @@ Two launchers are available via `--remote-launcher` (default `ssh`):
   this holds even if the job set `SLURM_EXPORT_ENV=NONE`), so it does not
   accept `--forward-env` / `--no-forward-env` either.
 
+If the launcher gives up (`--launch-timeout` elapses, or the launcher process
+itself dies), every worker it spawned self-destructs on its own
+`--deadline-sec` (`launch-timeout + 10`, set automatically -- not a flag you
+pass) rather than being left running and holding GPU memory / QPs for the
+next job on that node. This only applies to workers started BY the launcher;
+running `--worker` by hand (no launcher involved) is unaffected. An older
+`--remote-binary` built before this existed does not understand
+`--deadline-sec` and exits 2, which fails the run with exit 4 -- rebuild
+it with the same hva version as the launcher.
+
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
 `verbs/hip_mixed` subset (GPU memory registration / GDR paths) is a good local
@@ -152,6 +162,7 @@ not a suite defect.
 | `--nodes h1,h2` | launch one worker per node and reconcile |
 | `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
 | `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
+| `--deadline-sec <s>` | worker-only; set automatically by the launcher (not a flag you pass by hand) so the worker self-destructs if the launcher gives up |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
