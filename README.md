@@ -14,7 +14,7 @@ up on a platform for the first time (e.g. MI450)? Read
 
 ## Quickstart (real hardware)
 
-Prereqs: a C++20 compiler (g++ 13+) and CMake >= 3.20. A ROCm install
+Prereqs: a C++20 compiler (g++ 11+) and CMake >= 3.20. A ROCm install
 (`/opt/rocm`) is required only for the HIP tests (`-DACCEPT_WITH_HIP=ON`) and an
 RDMA NIC only for the Verbs tests (`-DACCEPT_WITH_IBVERBS=ON`) — with both flags
 off the harness still builds and runs the [synthetic set](#harness-smoke-test-no-gpunic)
@@ -55,14 +55,34 @@ local ranks:
       --kind func --report report.json
 ```
 
-Across two real nodes (rank 0 listens on `nodes[0]`, rank 1 is ssh-launched;
-binary + policy must be at the **same absolute path** on both, e.g. a shared FS):
+Across two real nodes (rank 0 listens on `nodes[0]`, rank 1 is launched by the
+selected `--remote-launcher`; binary + policy must be at the **same absolute
+path** on both, e.g. a shared FS):
 
 ```bash
 ./build/hva --nodes host1,host2 --filter-category 'verbs/*' \
       --kind func --report report.json
-#   [--ssh-user U] [--port P] [--remote-binary PATH] [--launch-timeout S]
+#   [--remote-launcher ssh|srun] [--port P] [--remote-binary PATH] [--launch-timeout S]
+#   ssh only: [--ssh-user U] [--forward-env LIST] [--no-forward-env]
 ```
+
+Two launchers are available via `--remote-launcher` (default `ssh`):
+
+- **`ssh`** — the default; works anywhere passwordless ssh between the
+  allocated nodes is set up (`~/.ssh/config` or `--ssh-user`). Each ssh worker
+  otherwise starts with only the remote login environment, not the launcher's,
+  so `--nodes` forwards a fixed set of launcher environment variables to every
+  worker; see [Env forwarding](#env-forwarding-ssh-launcher-only) below.
+- **`srun`** — use this inside a Slurm allocation where direct ssh between
+  compute nodes is blocked (a common cluster policy). It requires
+  `SLURM_JOB_ID` to be set (i.e. running from inside `sbatch`/`salloc`) and
+  does not accept `--ssh-user` (srun has no login-user concept — it runs as
+  the job's submitting user). Needs **Slurm >= 20.11** for the `--overlap`
+  flag the launcher passes so the step can share the allocation with the
+  batch/interactive step. Unlike ssh, srun propagates the launcher's
+  environment to the worker by itself (the launcher passes `--export=ALL`, so
+  this holds even if the job set `SLURM_EXPORT_ENV=NONE`), so it does not
+  accept `--forward-env` / `--no-forward-env` either.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the
@@ -110,8 +130,7 @@ not a suite defect.
 
 **Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `3` I/O error
 (cannot open/write a result or report file, mkdtemp/port allocation failure),
-`4` launch failure
-(ssh/unreachable/timeout).
+`4` launch failure (ssh/srun/unreachable/timeout).
 
 ---
 
@@ -128,12 +147,59 @@ not a suite defect.
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
 | `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
-| `--nodes h1,h2` | ssh-launch one worker per node and reconcile |
+| `--nodes h1,h2` | launch one worker per node and reconcile |
+| `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
+| `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
 | `--quiet` | print only the summary (suppress per-test lines) |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
 
 Full list: `./build/hva --help`.
+
+---
+
+## Env forwarding (ssh launcher only)
+
+ssh workers do not automatically share the launcher's environment — `--nodes`
+ssh-launches each worker with its **remote login environment**, which can carry
+a different (or no) ROCm. To make the common case ("test the ROCm I have
+`LD_LIBRARY_PATH`/`ROCM_PATH` pointed at, not whatever is on the node image")
+work out of the box, `--nodes` **forwards a fixed list of variables from the
+launcher's own environment by default**:
+
+```
+LD_LIBRARY_PATH, ROCM_PATH, PATH, HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES,
+HSA_* (prefix match), ACCEPT_* (prefix match)
+```
+
+**This is a behaviour change**: before this flag existed, ssh workers always ran
+with the remote login environment only. Forwarding is now **ON by default** —
+pass `--no-forward-env` to get the old behaviour back. Only variables actually
+set in the launcher's own environment are forwarded; the default list forwards
+nothing it doesn't find set.
+
+- `--forward-env LIST` replaces the default list with a comma-separated one of
+  your own (e.g. `--forward-env 'ROCM_PATH,MY_VAR,ACCEPT_*'`); a trailing `*`
+  is a prefix match. `--forward-env ''` forwards nothing (same effect as
+  `--no-forward-env`, spelled as an explicit empty list). `--forward-env` and
+  `--no-forward-env` together are a usage error (exit 2) — they express
+  opposite intents.
+- A variable name must match `[A-Za-z_][A-Za-z0-9_]*`, optionally followed by
+  one trailing `*`; anything else is a usage error (exit 2). A bare `*` is
+  rejected (forwarding "everything" is not an allowed pattern).
+- A variable name matching more than one entry (e.g. an explicit `HSA_FOO` and
+  the `HSA_*` prefix) is still forwarded exactly once.
+- **`PATH` and `--remote-binary`:** the default `--remote-binary` is this
+  binary's own resolved `/proc/self/exe` path (always absolute), so forwarding
+  `PATH` has no effect on finding it. If you instead pass `--remote-binary` as
+  a **bare name** (no `/`) relying on a remote `$PATH` lookup, forwarding
+  `PATH` changes which `$PATH` that lookup uses — the launcher's, not the
+  node's login shell's. Prefer an absolute `--remote-binary` to avoid that
+  dependency entirely.
+- Applies to the ssh launcher only. `--remote-launcher srun` always passes the
+  launcher's whole environment (`--export=ALL`), so it adds no `env` prefix,
+  and `--forward-env` / `--no-forward-env` with srun are a usage error (exit 2)
+  rather than silently ignored.
 
 ---
 
@@ -190,7 +256,7 @@ ACCEPTANCE: FAIL — 11 test(s) failed the gate
 The authoritative "harness behaves correctly" check asserts the full matrix:
 
 ```bash
-./build/unit_tests                                    # unit checks (reduce/classify, policy CSV, ssh builders)
+./build/unit_tests                                    # unit checks (reduce/classify, policy CSV, ssh/srun builders)
 bash scripts/selftest.sh ./build/hva .  # end-to-end checks against the synthetic oracle
 ```
 
@@ -220,13 +286,17 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact. Top level: `schema_version`, `harness` (`{version, git_sha}`
-— the build-time harness version and git SHA, also printed by `hva --version`;
-`git_sha` is `"unknown"` when built with no `.git`, e.g. from a source tarball),
-`mode`, `summary` counts, per-node `environment`, and `tests[]` with `id,
-category, class, status, reason, ticket, reduced_from, perf, gate_fail,
-flagged, note, duration_ms`. Under `--kind perf`, each test's `perf` map
-carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
+The machine artifact (`schema_version: "1.2"`). Top level: `harness`
+(`{version, git_sha}` — the build-time harness version and git SHA, also
+printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
+e.g. from a source tarball), `mode`, `summary` counts, per-node `environment`,
+and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
+perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
+`perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
+`environment.rocm_version` is resolved via a priority chain (loaded HIP
+runtime's own tree, then `$ROCM_PATH`, then `hipRuntimeGetVersion()`, then
+`/opt/rocm`); the winning source is recorded in
+`environment.rocm_version_source` and its root in `environment.rocm_path`.
 
 ### Further docs
 
