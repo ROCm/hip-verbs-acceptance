@@ -636,7 +636,7 @@ std::string await_importer_token(int sock, char expected, const char* lost) {
                            hipGetErrorString(import_err));
 
     void* va = nullptr;
-    const std::string map_error = vmm_map_and_touch(imported, size, 0, &va);
+    const std::string map_error = vmm_map_and_touch(imported, size, gpu(), &va);
     if (!map_error.empty()) {
       (void)hipMemRelease(imported);
       fail_as_importer(sock, map_error);
