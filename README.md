@@ -73,8 +73,9 @@ Two launchers are available via `--remote-launcher` (default `ssh`):
   the job's submitting user). Needs **Slurm >= 20.11** for the `--overlap`
   flag the launcher passes so the step can share the allocation with the
   batch/interactive step. Unlike ssh, srun propagates the launcher's
-  environment to the worker by itself — no separate env-forwarding flag is
-  needed for this path.
+  environment to the worker by itself (the launcher passes `--export=ALL`, so
+  this holds even if the job set `SLURM_EXPORT_ENV=NONE`) — no separate
+  env-forwarding flag is needed for this path.
 
 The full `verbs/*` set includes RDMA data-path tests that need two working NIC
 endpoints — run those across two real nodes. On a single host, the

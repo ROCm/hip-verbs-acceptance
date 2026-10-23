@@ -161,7 +161,7 @@ std::vector<std::string> build_ssh_argv(const SshRank& r,
 
 std::vector<std::string> build_srun_argv(const SshRank& r,
                                          const SshLaunchOptions& opts) {
-  // srun --nodes=1 --ntasks=1 --nodelist=<node> --overlap --quiet
+  // srun --nodes=1 --ntasks=1 --nodelist=<node> --overlap --export=ALL --quiet
   //      --kill-on-bad-exit=1 /bin/sh -c "<remote_command>"
   //
   //  --nodes=1 --ntasks=1 --nodelist=<node> : exactly one task, pinned to this
@@ -171,6 +171,9 @@ std::vector<std::string> build_srun_argv(const SshRank& r,
   //                     that is already running on these nodes (Slurm >= 20.11).
   //                     Without it, a second srun step can block waiting for
   //                     resources the first step already holds.
+  //  --export=ALL     : the task inherits the launcher's environment
+  //                     (LD_LIBRARY_PATH, ROCM_PATH, ...) even if the enclosing
+  //                     job set SLURM_EXPORT_ENV=NONE.
   //  --quiet          : suppress srun's own step-launch banner (keeps stdout
   //                     limited to the worker's --results-out - block).
   //  --kill-on-bad-exit=1 : if the task exits nonzero, don't leave siblings
@@ -185,6 +188,7 @@ std::vector<std::string> build_srun_argv(const SshRank& r,
   argv.push_back("--ntasks=1");
   argv.push_back("--nodelist=" + r.node);
   argv.push_back("--overlap");
+  argv.push_back("--export=ALL");
   argv.push_back("--quiet");
   argv.push_back("--kill-on-bad-exit=1");
   argv.push_back("/bin/sh");

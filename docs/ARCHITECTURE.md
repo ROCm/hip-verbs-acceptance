@@ -879,7 +879,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
 - `mpirun` launcher plugin (launcher/bootstrap split already admits it).
   *`srun` is implemented* (`--remote-launcher srun`) — one
   task per allocated node via `srun --nodes=1 --ntasks=1 --nodelist=<n>
-  --overlap`, for clusters where direct ssh between compute nodes is blocked.
+  --overlap --export=ALL`, for clusters where direct ssh between compute nodes is blocked.
   Requires Slurm >= 20.11 (`--overlap`) and `SLURM_JOB_ID` set (i.e. running
   inside an allocation).
 - `fw_version`-ranged classification entries (firmware-aware gating).

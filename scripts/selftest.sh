@@ -737,11 +737,11 @@ cat >"$FAKEBIN/srun" <<'SRUNEOF'
 #!/bin/sh
 # Fake srun: parse/ignore srun's own flags up to the program argv, then exec
 # the remainder locally. Mirrors build_srun_argv's argv shape:
-#   srun --nodes=1 --ntasks=1 --nodelist=<n> --overlap --quiet \
+#   srun --nodes=1 --ntasks=1 --nodelist=<n> --overlap --export=ALL --quiet \
 #        --kill-on-bad-exit=1 /bin/sh -c "<cmd>"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --nodes=*|--ntasks=*|--nodelist=*|--overlap|--quiet|--kill-on-bad-exit=*)
+    --nodes=*|--ntasks=*|--nodelist=*|--overlap|--export=ALL|--quiet|--kill-on-bad-exit=*)
       shift ;;
     /bin/sh)
       shift; break ;;

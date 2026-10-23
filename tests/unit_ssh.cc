@@ -209,6 +209,7 @@ void test_build_launch_argv() {
     CHECK(has_arg(a, "--ntasks=1"), "srun argv has --ntasks=1");
     CHECK(has_arg(a, "--nodes=1"), "srun argv has --nodes=1");
     CHECK(has_arg(a, "--overlap"), "srun argv has --overlap");
+    CHECK(has_arg(a, "--export=ALL"), "srun argv has --export=ALL");
     CHECK(has_arg(a, "--kill-on-bad-exit=1"),
           "srun argv has --kill-on-bad-exit=1");
     // Ends with /bin/sh, -c, <remote_command> as one element (same contract
