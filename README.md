@@ -14,7 +14,7 @@ up on a platform for the first time (e.g. MI450)? Read
 
 ## Quickstart (real hardware)
 
-Prereqs: a C++20 compiler (g++ 13+) and CMake >= 3.20. A ROCm install
+Prereqs: a C++20 compiler (g++ 11+) and CMake >= 3.20. A ROCm install
 (`/opt/rocm`) is required only for the HIP tests (`-DACCEPT_WITH_HIP=ON`) and an
 RDMA NIC only for the Verbs tests (`-DACCEPT_WITH_IBVERBS=ON`) — with both flags
 off the harness still builds and runs the [synthetic set](#harness-smoke-test-no-gpunic)
@@ -230,10 +230,15 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact. Top level: `mode`, `summary` counts, per-node `environment`,
-and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
-perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
-`perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
+The machine artifact (`schema_version: "1.1"`). Top level: `mode`, `summary`
+counts, per-node `environment`, and `tests[]` with `id, category, class,
+status, reason, ticket, reduced_from, perf, gate_fail, flagged, note,
+duration_ms`. Under `--kind perf`, each test's `perf` map carries
+`<metric>.{median,min,max,avg,unit,iters,samples}`. `environment.rocm_version`
+is resolved via a priority chain (loaded HIP runtime's own tree, then
+`$ROCM_PATH`, then `hipRuntimeGetVersion()`, then `/opt/rocm`); the winning
+source is recorded in `environment.rocm_version_source` and its root in
+`environment.rocm_path`.
 
 ### Further docs
 
