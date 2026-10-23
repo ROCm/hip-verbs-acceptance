@@ -25,5 +25,9 @@ void hip_api_fini() {
   close_library(hip_lib_info);
 }
 
+void* hip_dlopen_handle() {
+  return hip_lib_info.handle;
+}
+
 }  // namespace hipw
 }  // namespace acceptance

@@ -32,6 +32,7 @@
 // RDMA/GPU hardware present.
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -70,7 +71,24 @@ struct RdmaDevice {
 struct EnvironmentInfo {
   std::string vendor;       // connectx | thor | ionic | unknown | synthetic
   std::string rdma_prefix;  // mlx5_ | bnxt_re | ionic (from the first device)
-  std::string rocm_version; // first line of /opt/rocm/.info/version (best-effort)
+  // ROCm version actually in use, resolved via a priority chain so it matches
+  // the ROCm that hva's HIP dlopen wrapper loaded rather than whatever happens
+  // to sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
+  //   1. "runtime_info"  — directory of the LOADED libamdhip64.so (dlinfo on
+  //                        the wrapper's handle): .info/version in its lib/
+  //                        dir or that dir's parent.
+  //   2. "rocm_path"     — $ROCM_PATH/.info/version (absolute $ROCM_PATH only).
+  //   3. "hip_runtime"   — hipRuntimeGetVersion() decoded (no path known).
+  //   4. "opt_rocm"      — /opt/rocm/.info/version (today's behaviour).
+  //   (none found -> rocm_version empty, rocm_version_source == "none")
+  // Sources 1 and 3 require ACCEPT_HAVE_HIP and a loaded HIP runtime.
+  std::string rocm_version;
+  // Root directory the winning source points to (empty for "hip_runtime"/
+  // "none", where no filesystem path is known).
+  std::string rocm_path;
+  // Which source above won: "runtime_info" | "rocm_path" | "hip_runtime" |
+  // "opt_rocm" | "none".
+  std::string rocm_version_source;
   int         gpu_count = 0;
   std::string kernel;       // uname(2) .release
   std::string os;           // PRETTY_NAME from /etc/os-release
@@ -98,6 +116,21 @@ struct EnvironmentInfo {
   // device list is reassembled from the highest rdma.<i>.* index seen.
   static EnvironmentInfo from_kv(const std::vector<std::string>& lines);
 };
+
+// Decode a HIP_VERSION-style integer (HIP_VERSION = major*10000000 +
+// minor*100000 + patch, e.g. from hipRuntimeGetVersion()) into
+// "major.minor.patch". Returns an empty string for a non-positive input. Pure
+// arithmetic, no HIP dependency -- unit-testable without HIP.
+std::string decode_hip_version(int version);
+
+// Walk from `start_dir` up through at most `max_levels` parent directories
+// (start_dir itself is level 0) looking for "<dir>/.info/version". Returns the
+// first line of the first one found (trailing CR/LF stripped), or
+// std::nullopt if none exists within the search depth. Only a regular file
+// whose first line is a version string ([A-Za-z0-9._+~-]) counts as found.
+// Pure filesystem read -- unit-testable without HIP or dlopen.
+std::optional<std::string> find_info_version(const std::string& start_dir,
+                                              int max_levels);
 
 // Probe the local node. Best-effort, never throws. Honors ACCEPT_FAKE_ENV (see
 // file header) as a deterministic test seam.

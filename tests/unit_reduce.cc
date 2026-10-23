@@ -180,12 +180,13 @@ int main() {
   test_apply_classification();
   test_pick_predicate_env();
   // Policy CSV parse/classify/load, ResultIO/TestResult round-trip, ssh/CLI
-  // builders + quoting, perf key grammar/rank merge/rendering (sibling TUs,
-  // sharing the counters).
+  // builders + quoting, perf key grammar/rank merge/rendering, Capability's
+  // pure HIP-free helpers (sibling TUs, sharing the counters).
   accept_test::run_policy_tests();
   accept_test::run_resultio_tests();
   accept_test::run_ssh_tests();
   accept_test::run_perf_tests();
+  accept_test::run_capability_tests();
 
   std::printf("unit_tests: %d checks, %d failures\n", accept_test::g_checks,
               accept_test::g_failures);
