@@ -159,6 +159,53 @@ std::vector<std::string> build_ssh_argv(const SshRank& r,
   return argv;
 }
 
+std::vector<std::string> build_srun_argv(const SshRank& r,
+                                         const SshLaunchOptions& opts) {
+  // srun --nodes=1 --ntasks=1 --nodelist=<node> --overlap --export=ALL --quiet
+  //      --kill-on-bad-exit=1 /bin/sh -c "<remote_command>"
+  //
+  //  --nodes=1 --ntasks=1 --nodelist=<node> : exactly one task, pinned to this
+  //                     rank's allocated node (rank 0's own node included —
+  //                     there is no local-node special case).
+  //  --overlap        : share the allocation with the batch/interactive step
+  //                     that is already running on these nodes (Slurm >= 20.11).
+  //                     Without it, a second srun step can block waiting for
+  //                     resources the first step already holds.
+  //  --export=ALL     : the task inherits the launcher's environment
+  //                     (LD_LIBRARY_PATH, ROCM_PATH, ...) even if the enclosing
+  //                     job set SLURM_EXPORT_ENV=NONE.
+  //  --quiet          : suppress srun's own step-launch banner (keeps stdout
+  //                     limited to the worker's --results-out - block).
+  //  --kill-on-bad-exit=1 : if the task exits nonzero, don't leave siblings
+  //                     running (mirrors the launcher's bounded-wait contract).
+  // The remote command is ONE argv element, exactly as with ssh; srun hands it
+  // to /bin/sh -c on the target node, which then parses it as a normal shell
+  // command line (single-quoted sub-tokens and all).
+  (void)opts;  // srun ignores ssh_user/connect_timeout (ssh-only knobs)
+  std::vector<std::string> argv;
+  argv.push_back("srun");
+  argv.push_back("--nodes=1");
+  argv.push_back("--ntasks=1");
+  argv.push_back("--nodelist=" + r.node);
+  argv.push_back("--overlap");
+  argv.push_back("--export=ALL");
+  argv.push_back("--quiet");
+  argv.push_back("--kill-on-bad-exit=1");
+  argv.push_back("/bin/sh");
+  argv.push_back("-c");
+  argv.push_back(r.remote_command);
+  return argv;
+}
+
+std::vector<std::string> build_launch_argv(const SshRank& r,
+                                           const SshLaunchOptions& opts) {
+  switch (opts.launcher) {
+    case RemoteLauncher::Srun: return build_srun_argv(r, opts);
+    case RemoteLauncher::Ssh:
+    default:                   return build_ssh_argv(r, opts);
+  }
+}
+
 std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
                                        const SshLaunchOptions& opts) {
   const size_t n = ranks.size();
@@ -211,16 +258,17 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
       const int devnull = ::open("/dev/null", O_RDONLY);
       if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
 
-      const std::vector<std::string> argv = build_ssh_argv(ranks[i], opts);
+      const std::vector<std::string> argv = build_launch_argv(ranks[i], opts);
       std::vector<char*> cargv;
       cargv.reserve(argv.size() + 1);
       // execvp does not modify argv, but the signature wants char* const*.
       for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
       cargv.push_back(nullptr);
-      ::execvp("ssh", cargv.data());
-      // exec failed — emit a diagnostic on the (redirected) stderr and exit 127.
-      const char* msg = "hva: failed to exec ssh\n";
-      (void)!::write(STDERR_FILENO, msg, std::strlen(msg));
+      ::execvp(argv[0].c_str(), cargv.data());
+      // exec failed — emit a diagnostic naming the selected launcher on the
+      // (redirected) stderr and exit 127.
+      const std::string msg = "hva: failed to exec " + argv[0] + "\n";
+      (void)!::write(STDERR_FILENO, msg.c_str(), msg.size());
       ::_exit(127);
     }
 
