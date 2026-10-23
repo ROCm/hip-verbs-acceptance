@@ -1231,10 +1231,14 @@ fi
 # 127.0.0.1,127.0.0.2 puts rank 0 on this host (fork/exec) and rank 1 on
 # "another" host, started through the fake srun from check (l). Rank 0's
 # rendezvous is then advertised under this machine's hostname, so the check is
-# skipped when that name does not resolve.
+# skipped when that name does not resolve to an IPv4 address this host owns
+# (a stale DNS record would send rank 1 to another machine).
 # ===========================================================================
-if ! getent hosts "$(hostname)" >/dev/null 2>&1; then
-  pass "mixed local + srun ranks (SKIPPED: hostname '$(hostname)' does not resolve)"
+if ! "$PY" -c '
+import socket
+s = socket.socket()
+s.bind((socket.gethostbyname(socket.gethostname()), 0))' >/dev/null 2>&1; then
+  pass "mixed local + srun ranks (SKIPPED: hostname '$(hostname)' does not resolve to this host)"
 else
   REP_V="$TMP/rep_mixed.json"
   LOG_V="$TMP/mixed.log"
