@@ -61,9 +61,9 @@ overrides), NIC = that GPU's nearest ACTIVE NIC (`--hca` overrides). Both flags
 take one value or one per local rank, e.g. `-n 2 --device 0,4` or
 `-n 2 --hca bnxt_re0,bnxt_re1`; `--hca` alone picks the GPU nearest to it. When
 affinity is unknown (or ties), the first ACTIVE NIC is used and a `note:` line
-says why. A `selection:` line per rank prints the pair before the test lines
-(e.g. `selection: rank 1 on node1: GPU 1 (default), HCA bnxt_re1 (affinity)`),
-and each node's `selection` in `report.json` records it. Pinning both ranks to
+says why. A `topology:` line per rank prints the pair before the test lines
+(e.g. `topology: rank 1 on node1: GPU 1 (default), HCA bnxt_re1 (affinity)`),
+and each node's `topology` in `report.json` records it. Pinning both ranks to
 one NIC (`--hca bnxt_re0`) makes it a single-NIC loopback check.
 
 A GPU-only host (no RDMA device) prints `HCA none` and can run the HIP tests:
@@ -322,7 +322,7 @@ The machine artifact (`schema_version: "1.3"`). Top level: `harness`
 printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
 e.g. from a source tarball), `mode`, `launch` (`{np, ppn, hosts}` — the run's
 `-n` / `-ppn` / `-hosts` shape), `summary` counts, per-node `environment`
-and `selection` (`{hca, gpu, hca_source, gpu_source, local, note}` — the NIC
+and `topology` (`{hca, gpu, hca_source, gpu_source, local, note}` — the NIC
 and HIP GPU the rank used, each source `user` / `affinity` / `default`, `local`
 when the NIC is the GPU's nearest, and `note` why a fallback was taken),
 and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,

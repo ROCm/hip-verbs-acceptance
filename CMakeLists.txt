@@ -44,7 +44,7 @@ add_executable(hva
   common/SockCompat.cpp
   common/SocketBootstrap.cpp
   common/Launch.cpp
-  common/Selection.cpp
+  common/Topology.cpp
   common/SshLauncher.cpp
   synthetic/basic.cc
   synthetic/failures.cc
@@ -187,7 +187,7 @@ add_executable(unit_tests
   tests/unit_resultio.cc
   tests/unit_ssh.cc
   tests/unit_launch.cc
-  tests/unit_selection.cc
+  tests/unit_topology.cc
   tests/unit_perf.cc
   tests/unit_capability.cc
   common/Reporter.cpp
@@ -196,7 +196,7 @@ add_executable(unit_tests
   common/ResultIO.cpp
   common/Capability.cpp
   common/Launch.cpp
-  common/Selection.cpp
+  common/Topology.cpp
   common/SshLauncher.cpp
   common/TestRegistry.cpp
 )

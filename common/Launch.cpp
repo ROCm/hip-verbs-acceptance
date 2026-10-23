@@ -11,7 +11,7 @@
 #include <string>
 #include <system_error>
 
-#include "common/Selection.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -116,8 +116,8 @@ std::vector<std::string> build_worker_args(const WorkerParams& p,
   add("--kind", p.kind);
   if (p.isolate_explicit) add("--isolate", p.isolate);
   add("--gid", p.gid);
-  add("--hca", pick_for_local_rank(p.hca, placement.local_rank));
-  add("--device", pick_for_local_rank(p.device, placement.local_rank));
+  add("--hca", topology::get_rank_entry(p.hca, placement.local_rank));
+  add("--device", topology::get_rank_entry(p.device, placement.local_rank));
   if (p.deadline_sec > 0) add("--deadline-sec", std::to_string(p.deadline_sec));
   return a;
 }

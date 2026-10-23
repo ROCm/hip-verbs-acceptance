@@ -34,8 +34,8 @@
 #include <vector>
 
 #include "common/Perf.hpp"
-#include "common/Selection.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -57,7 +57,7 @@ struct OpenedDevice {
   }
 };
 
-// Open the selected HCA (ACCEPT_HCA, see Selection.hpp), else the first
+// Open the selected HCA (ACCEPT_HCA, see Topology.hpp), else the first
 // enumerable device -- the same override RcConn::open() and the environment
 // report honor, so these tests run on the device the report names. Returns
 // false on failure and fills `err`. `no_devices` is set true when the host
@@ -82,7 +82,7 @@ bool open_selected_device(OpenedDevice& d, std::string& err, bool& no_devices) {
     return false;
   }
   int idx = 0;
-  if (const std::string want = hca(); !want.empty()) {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     idx = -1;
     for (int i = 0; i < num; ++i) {
       const char* name = ibv_get_device_name(d.list[i]);

@@ -292,7 +292,7 @@ Detected automatically — never configured:
 through thin shims in `wrapper/`, so the binary loads and reports cleanly on a node
 missing them rather than failing to start. (`-ldl`, `pthread` are the hard deps.)
 
-**GPU and NIC selection is deterministic and logged** (`common/Selection.*`).
+**GPU and NIC selection is deterministic and logged** (`common/Topology.*`).
 Each rank resolves one GPU (HIP ordinal) and one RDMA device (HCA):
 
 | Given | GPU | HCA |
@@ -308,16 +308,17 @@ PCIe path shares the deepest ancestor with the GPU's (same switch beats same
 root port); a tie (`ambiguous`) or no affinity falls back to the
 first ACTIVE NIC with a `note` — never an error. HIP ordinals are mapped to KFD
 GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. A
-`selection:` line on stderr shows the pair before the test lines (a launcher
+`topology:` line on stderr shows the pair before the test lines (a launcher
 prints it for every rank from the workers' `@env` blocks). The rank
 then `hipSetDevice()`s its GPU and publishes the pair as `ACCEPT_HCA` /
 `ACCEPT_DEVICE`, which the verbs device-open paths and the HIP tests read
-(`hca()` / `gpu()`) and the isolated `--exec` children inherit. `gpu()` is
-made current again before every test body, isolated or in-process, except
-tests that `fork()` before their first HIP call (`hip/ipc`,
+(`topology::get_rank_hca()` / `get_rank_gpu()`) and the isolated `--exec`
+children inherit. The GPU is made current again before every test body,
+isolated or in-process, except tests that `fork()` before their first HIP call
+(`hip/ipc`,
 `Vmm_Reclaim_Cycles_CrossProcess`), which select it themselves. If that fails
 on a host with GPUs, the rank exits 2 at startup, or the test fails. The pair
-is recorded per node as `selection`.
+is recorded per node as `topology`.
 
 The cluster is assumed **homogeneous**, but "homogeneous" is treated as a
 *rollup, not a precondition* (per review): each node's descriptor is recorded
@@ -668,7 +669,7 @@ selection filter narrowed the run.
         "gpu_devices": [ { "ordinal": 0, "hip_ordinal": 0, "bdf": "…", "numa_node": 0, "arch": "gfx…" } ],
         "gpu_nic_affinity": [ { "gpu": 0, "nearest_nic": "bnxt_re0", "ambiguous": false } ]
       },
-      "selection": {                           // the GPU / NIC this rank used
+      "topology": {                            // the GPU / NIC this rank used
         "hca": "bnxt_re0", "gpu": 0,
         "hca_source": "affinity", "gpu_source": "default",  // user | affinity | default
         "local": true,                         // hca is the gpu's nearest NIC
@@ -769,6 +770,7 @@ hip-verbs-acceptance/
                           # e.g. connectx.csv, thor.csv, ionic.csv, mi350_thor.csv
   common/                 # Types, TestRegistry, Runner (isolation+watchdog),
                           # Bootstrap + SocketBootstrap, Capability probe,
+                          # Topology (GPU-NIC affinity, rank GPU/HCA),
                           # Policy (CSV) loader, Reporter (JSON), Perf
   wrapper/                # dlopen/dlsym shims for libibverbs / libamdhip64
   vendor/                 # vendored rocm-headers / rdma-core-headers

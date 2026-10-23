@@ -5,9 +5,8 @@
  ************************************************************************/
 
 // unit_capability — tests for the pure, HIP-free helpers behind the ROCm
-// version resolution and GPU-NIC affinity (common/Capability.*):
+// version resolution (common/Capability.*):
 //   * decode_hip_version(int) -- HIP_VERSION integer -> "major.minor.patch".
-//   * kfd_location_bdf / pci_path_shared_depth -- KFD BDF and PCIe distance.
 //   * find_info_version(start_dir, max_levels) -- walk-up-for-.info/version,
 //     exercised against a temp directory tree created (and removed) here.
 // All are plain filesystem/arithmetic code with no ACCEPT_HAVE_HIP
@@ -41,33 +40,6 @@ void test_decode_hip_version() {
                "decode_hip_version: zero -> empty (no HIP)");
   CHECK_EQ_STR(decode_hip_version(-1), "",
                "decode_hip_version: negative -> empty");
-}
-
-void test_kfd_location_bdf() {
-  // Ruby (MI350X): GPU0 is 0000:08:00.0 and KFD prints location_id 2048.
-  CHECK_EQ_STR(kfd_location_bdf("2048", "0"), "0000:08:00.0", "bus 8, devfn 0");
-  CHECK_EQ_STR(kfd_location_bdf("49425", "1"), "0001:c1:02.1",
-               "bus 0xc1, dev 2, fn 1, domain 1");
-  CHECK_EQ_STR(kfd_location_bdf("2048", ""), "0000:08:00.0", "no domain -> 0");
-  CHECK_EQ_STR(kfd_location_bdf("", "0"), "", "no location_id");
-  CHECK_EQ_STR(kfd_location_bdf("0x800", "0"), "", "not decimal");
-  CHECK_EQ_STR(kfd_location_bdf("65536", "0"), "", "above 16 bits");
-}
-
-void test_pci_path_shared_depth() {
-  // Ruby: GPU0 and bnxt_re0 share a switch under root port 00:01.1; bnxt_re1
-  // is under another root port.
-  const std::string gpu0 =
-      "/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0/0000:02:03.0/"
-      "0000:06:00.0/0000:07:00.0/0000:08:00.0";
-  const std::string re0 =
-      "/sys/devices/pci0000:00/0000:00:01.1/0000:01:00.0/0000:02:00.0/0000:03:00.0";
-  const std::string re1 =
-      "/sys/devices/pci0000:00/0000:00:01.2/0000:11:00.0/0000:12:00.0/0000:13:00.0";
-  CHECK(pci_path_shared_depth(gpu0, re0) == 5, "same switch: sys/devices/root/rp/switch");
-  CHECK(pci_path_shared_depth(gpu0, re1) == 3, "same root complex only");
-  CHECK(pci_path_shared_depth(gpu0, gpu0) == 9, "identical path");
-  CHECK(pci_path_shared_depth(gpu0, "") == 0, "unresolved path");
 }
 
 // Write `content` to `path`, creating parent directories as needed.
@@ -165,8 +137,6 @@ void test_find_info_version() {
 
 void run_capability_tests() {
   test_decode_hip_version();
-  test_kfd_location_bdf();
-  test_pci_path_shared_depth();
   test_find_info_version();
 }
 

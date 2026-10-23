@@ -41,7 +41,8 @@ receives `ctx` (rank/size/bootstrap) and returns `pass()`, `fail("reason")`, or
 // in hip/<category>.cc, inside namespace acceptance, guarded by ACCEPT_HAVE_HIP
 ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(gpu()));  // this rank's GPU (--device / local rank)
+  const int gpu = topology::get_rank_gpu();  // this rank's GPU (--device / local rank)
+  HIP_CHECK(hipSetDevice(gpu));
 
   DeviceBuffer buf;
   HIP_CHECK(buf.allocate(4096));
@@ -54,7 +55,8 @@ ACCEPT_TEST(MyFeature_Works, "hip/device", Topology::Single, Kind::Functional, 3
 `HIP_CHECK(expr)` returns `fail()` with the call text + `hipGetErrorString` on a
 non-`hipSuccess` return, and (under `--kind perf`) records the call's latency.
 
-Pass `gpu()`, never a literal `0`, wherever a call takes a device. A test that
+Pass `topology::get_rank_gpu()`, never a literal `0`, wherever a call takes a
+device. Verbs tests open `topology::get_rank_hca()`. A test that
 `fork()`s before its first HIP call must be added to the exceptions in
 `prepare_test` (`main.cc`), so HIP is not initialized ahead of the fork.
 
@@ -151,3 +153,25 @@ python3 -c 'import json;print([t["perf"] for t in json.load(open("r.json"))["tes
 # confirm the test is listed in the policy (no UNCLASSIFIED):
 ./build/hva --lint --vendor mi350_ionic --policy policy/mi350_ionic.csv
 ```
+
+## Naming
+
+New code follows one convention (older modules are being moved over):
+
+- One C++ namespace per module, named after it: `common/Topology.*` is
+  `acceptance::topology`. Inside `namespace acceptance`, call it as
+  `topology::get_rank_gpu()`.
+- Functions are `verb_object`, with the verb saying what the call does:
+
+  | Verb | Meaning |
+  |---|---|
+  | `get` | a lookup that always returns (`""` / `-1` when there is none) |
+  | `find` | returns a pointer, `nullptr` when there is none |
+  | `is` | a `bool` check |
+  | `select` | makes a decision (e.g. the rank's GPU/HCA pair) |
+  | `compute`, `parse`, `format`, `validate` | as named; no side effects |
+  | `set`, `apply` | changes process state (environment, current device) |
+
+- `.cpp` / `.hpp` for harness code, `.cc` for files that hold tests.
+- Test IDs keep their area's style (`CamelCase_Words` for HIP, `vat_snake` for
+  verbs): they are keys in the policy CSVs and in past reports.

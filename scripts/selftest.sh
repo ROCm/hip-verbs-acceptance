@@ -1271,7 +1271,7 @@ fi
 # Check (w): GPU / HCA selection on the fake env (GPUs 0-3 nearest bnxt_re0,
 # GPUs 4-7 nearest bnxt_re1). -n 2 --device 0,4 gives each local rank its own
 # GPU and, by affinity, its own NIC; --hca alone picks the nearest GPU; a
-# non-nearest pair runs with a note; each rank prints a "selection:" header.
+# non-nearest pair runs with a note; each rank prints a "topology:" header.
 # A NIC name in --device and a list that is neither 1 nor -ppn entries long
 # are usage errors (exit 2).
 # ===========================================================================
@@ -1306,15 +1306,15 @@ elif [ "$RC_W5" -ne 2 ] || ! grep -q -- '--hca lists 3 entries' "$TMP/sel_bad2.l
 elif ! grep -q 'note: HCA bnxt_re1 is not the nearest NIC to GPU 0 (nearest: bnxt_re0)' "$LOG_W3"; then
   fail "GPU/HCA selection" "--hca bnxt_re1 --device 0 printed no note"
   cat "$LOG_W3"
-elif ! grep -q '^selection: rank 1 on [^:]*: GPU 4 (user), HCA bnxt_re1 (affinity)$' "$LOG_W" ||
-     ! grep -q '^selection: GPU 4 (affinity), HCA bnxt_re1 (user)$' "$LOG_W2"; then
-  fail "GPU/HCA selection" "missing or wrong 'selection:' header"
+elif ! grep -q '^topology: rank 1 on [^:]*: GPU 4 (user), HCA bnxt_re1 (affinity)$' "$LOG_W" ||
+     ! grep -q '^topology: GPU 4 (affinity), HCA bnxt_re1 (user)$' "$LOG_W2"; then
+  fail "GPU/HCA selection" "missing or wrong 'topology:' header"
   cat "$LOG_W" "$LOG_W2"
 elif ! "$PY" - "$REP_W" "$REP_W2" <<'PYEOF' >"$TMP/w_out.txt" 2>&1
 import json, sys
 errs = []
 def sel(path):
-    return [n.get("selection") for n in json.load(open(path)).get("nodes", [])]
+    return [n.get("topology") for n in json.load(open(path)).get("nodes", [])]
 want = [{"hca": "bnxt_re0", "gpu": 0, "hca_source": "affinity",
          "gpu_source": "user", "local": True, "note": None},
         {"hca": "bnxt_re1", "gpu": 4, "hca_source": "affinity",

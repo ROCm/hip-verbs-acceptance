@@ -78,7 +78,7 @@ std::string sweep_one_size(size_t bytes, bool async, int peer, PerfSink& perf) {
   const std::string mode = async ? "async" : "sync";
   const std::string size_tag = " (S=" + std::to_string(bytes) + ", " + mode + ")";
 
-  const int dev = gpu();
+  const int dev = topology::get_rank_gpu();
   if (hipSetDevice(dev) != hipSuccess)
     return "hipSetDevice(" + std::to_string(dev) + ")" + size_tag;
 
@@ -374,7 +374,7 @@ ACCEPT_TEST(Memcpy_D2H_Async, "hip/datamovement", Topology::Single,
 ACCEPT_TEST(Memcpy_Size_Sweep, "hip/datamovement", Topology::Single,
             Kind::Functional, 180) {
   (void)ctx;
-  const int dev = gpu();
+  const int dev = topology::get_rank_gpu();
   HIP_CHECK(hipSetDevice(dev));
 
   int device_count = 0;

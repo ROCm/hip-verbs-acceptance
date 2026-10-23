@@ -32,8 +32,8 @@
 #include <string>
 
 #include "common/Bootstrap.hpp"
-#include "common/Selection.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 namespace verbsx {
@@ -137,7 +137,7 @@ inline Gate gate(Bootstrap* b, Gate mine) {
 // connect itself. Returns "" when there's no request to check, or the
 // request was honored; otherwise a reason.
 inline std::string check_requested_device(const std::string& opened) {
-  const std::string want = hca();
+  const std::string want = topology::get_rank_hca();
   if (want.empty() || opened == want) return "";
   return "connected on '" + opened + "' but the selected HCA is '" + want + "'";
 }

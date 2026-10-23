@@ -186,7 +186,7 @@ int main() {
   accept_test::run_resultio_tests();
   accept_test::run_ssh_tests();
   accept_test::run_launch_tests();
-  accept_test::run_selection_tests();
+  accept_test::run_topology_tests();
   accept_test::run_perf_tests();
   accept_test::run_capability_tests();
 

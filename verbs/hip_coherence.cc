@@ -40,8 +40,8 @@
 #include "common/Capability.hpp"
 #include "common/Perf.hpp"
 #include "common/PosixUtil.hpp"
-#include "common/Selection.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 #include "hip/utils/HipModule.hpp"
 
 namespace acceptance {
@@ -72,7 +72,7 @@ enum class Variant { WaitFirst, PutFirst, CrossNic };
 // nearest NIC.
 std::string far_nic_for_gpu(int gpu) {
   const EnvironmentInfo& env = environment();
-  const GpuNicAffinity* a = affinity_for_gpu(env, gpu);
+  const GpuNicAffinity* a = topology::find_gpu_affinity(env, gpu);
   const std::string nearest = a == nullptr ? "" : a->nearest_nic;
   if (nearest.empty()) return "";  // can't tell which NIC is "far"
   for (const auto& d : env.rdma_devices)
@@ -270,6 +270,7 @@ TestResult run_put_first(const Phase4Ctx& c) {
 }
 
 TestResult coherence_run(TestContext& ctx, Variant variant) {
+  const int gpu = topology::get_rank_gpu();
   if (ctx.size != 2 || ctx.boot == nullptr) return skip("needs 2 ranks");
   Bootstrap* boot = ctx.boot;
   const bool is_owner = (ctx.rank == kOwnerRank);
@@ -299,10 +300,10 @@ TestResult coherence_run(TestContext& ctx, Variant variant) {
   std::string dev_name;
   Gate mine = Gate::Ok;
   if (variant == Variant::CrossNic) {
-    dev_name = far_nic_for_gpu(gpu());
+    dev_name = far_nic_for_gpu(gpu);
     if (dev_name.empty()) {
       mine = Gate::Skip;
-      reason = "cross_nic: no RDMA device other than GPU " + std::to_string(gpu()) +
+      reason = "cross_nic: no RDMA device other than GPU " + std::to_string(gpu) +
                "'s nearest NIC";
     }
   }

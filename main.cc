@@ -463,7 +463,7 @@ int parse_args(int argc, char** argv, Options& opt) {
     return 2;
   }
   // A worker gets its own entries already picked.
-  if (const std::string err = validate_selection_lists(
+  if (const std::string err = topology::validate_lists(
           opt.hca, opt.device,
           opt.worker ? 1
                      : effective_ppn(opt.np, opt.ppn, split_nodes(opt.hosts).size()));
@@ -527,7 +527,7 @@ int parse_args(int argc, char** argv, Options& opt) {
 // hipSetDevice(g) when the HIP runtime is there. Returns why it failed, or ""
 // on success and when there is no GPU at all (no HIP runtime or no device):
 // verbs-only runs need none, and the HIP tests report that themselves.
-std::string make_gpu_current(int g) {
+std::string set_current_gpu(int g) {
 #ifdef ACCEPT_HAVE_HIP
   if (!hipw::init_result().hip_lib_loaded) return "";
   try {
@@ -546,34 +546,35 @@ std::string make_gpu_current(int g) {
 #endif
 }
 
-// Make gpu() current before a test body: the previous in-process test may
-// have left another GPU current. Tests that fork before their first HIP call
-// select gpu() themselves: a child inheriting an initialized HIP runtime
+// Make the rank's GPU current before a test body: the previous in-process
+// test may have left another GPU current. Tests that fork before their first
+// HIP call select it themselves: a child inheriting an initialized HIP runtime
 // cannot use it.
 std::string prepare_test(const TestMeta& meta) {
   if (meta.category == "hip/ipc" || meta.id == "Vmm_Reclaim_Cycles_CrossProcess")
     return "";
-  return make_gpu_current(gpu());
+  return set_current_gpu(topology::get_rank_gpu());
 }
 
 // Resolve this rank's GPU and HCA (detect()), say why if a fallback was
-// taken, make the GPU current, and publish the pair for hca()/gpu() and the
-// --exec children. Only for processes that run tests: a launcher's resolved
+// taken, make the GPU current, and publish the pair for
+// topology::get_rank_hca() / get_rank_gpu() and the --exec children. Only for processes that run tests: a launcher's resolved
 // pair would leak into its workers' inherited / forwarded environment. The
 // header goes to stderr: a worker's stdout carries its results. The launcher
 // only shows a worker's stderr on failure and prints the pair itself. False
 // (after an error line) when the GPU can't be made current.
-bool apply_selection(const Options& opt, bool worker) {
-  const Selection& sel = environment().selection;
+bool apply_topology(const Options& opt, bool worker) {
+  const topology::Pair& pair = environment().rank_pair;
   if (!opt.quiet) {
     const std::string who = worker ? "rank " + std::to_string(opt.rank) + ": " : "";
-    std::fprintf(stderr, "selection: %s%s\n", who.c_str(), format_selection(sel).c_str());
+    std::fprintf(stderr, "topology: %s%s\n", who.c_str(),
+                 topology::format_pair(pair).c_str());
   }
-  if (!sel.note.empty()) std::fprintf(stderr, "note: %s\n", sel.note.c_str());
-  if (!sel.hca.empty()) ::setenv("ACCEPT_HCA", sel.hca.c_str(), 1);
-  ::setenv("ACCEPT_DEVICE", std::to_string(sel.gpu).c_str(), 1);
-  if (const std::string err = make_gpu_current(sel.gpu); !err.empty()) {
-    std::fprintf(stderr, "error: GPU %d: %s\n", sel.gpu, err.c_str());
+  if (!pair.note.empty()) std::fprintf(stderr, "note: %s\n", pair.note.c_str());
+  if (!pair.hca.empty()) ::setenv("ACCEPT_HCA", pair.hca.c_str(), 1);
+  ::setenv("ACCEPT_DEVICE", std::to_string(pair.gpu).c_str(), 1);
+  if (const std::string err = set_current_gpu(pair.gpu); !err.empty()) {
+    std::fprintf(stderr, "error: GPU %d: %s\n", pair.gpu, err.c_str());
     return false;
   }
   return true;
@@ -1031,7 +1032,7 @@ int do_worker(const Options& opt) {
                  opt.size);
     return 2;
   }
-  if (!apply_selection(opt, /*worker=*/true)) return 2;
+  if (!apply_topology(opt, /*worker=*/true)) return 2;
 
   // Construct bootstrap; failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
@@ -1390,11 +1391,11 @@ int do_launch(const Options& opt) {
   // its @env block) ahead of the per-test lines.
   if (!opt.quiet) {
     for (const auto& n : in.nodes) {
-      const Selection& sel = n.environment.selection;
-      std::fprintf(stderr, "selection: rank %d on %s: %s\n", n.rank, n.host.c_str(),
-                   format_selection(sel).c_str());
-      if (!sel.note.empty())
-        std::fprintf(stderr, "note: rank %d: %s\n", n.rank, sel.note.c_str());
+      const topology::Pair& pair = n.environment.rank_pair;
+      std::fprintf(stderr, "topology: rank %d on %s: %s\n", n.rank, n.host.c_str(),
+                   topology::format_pair(pair).c_str());
+      if (!pair.note.empty())
+        std::fprintf(stderr, "note: rank %d: %s\n", n.rank, pair.note.c_str());
     }
   }
 
@@ -1415,7 +1416,7 @@ int run(const Options& opt) {
       return do_list();
 
     case Mode::Exec:
-      // The parent published its resolved pair; do_exec makes gpu() current.
+      // The parent published its resolved pair; do_exec makes its GPU current.
       return do_exec(opt);
 
     case Mode::Worker:
@@ -1428,7 +1429,7 @@ int run(const Options& opt) {
       // rank on another host, go through the launcher; a single local rank
       // runs in-process: worker + policy + Reporter -> report.json + gate.
       if (!opt.lint && needs_launch(opt)) return do_launch(opt);
-      if (!opt.lint && !apply_selection(opt, /*worker=*/false)) return 2;
+      if (!opt.lint && !apply_topology(opt, /*worker=*/false)) return 2;
       return do_run(opt);
   }
   return 0;
@@ -1488,14 +1489,15 @@ int main(int argc, char** argv) {
   // detect()/device open. setenv propagates to forked --exec children (they
   // inherit the environment); launched workers get their own entries as flags
   // (see build_worker_args). Capability reads ACCEPT_IB_GID_INDEX, and
-  // detect() resolves the selection from ACCEPT_HCA/ACCEPT_DEVICE/
+  // detect() resolves the pair from ACCEPT_HCA/ACCEPT_DEVICE/
   // ACCEPT_LOCAL_RANK. A worker's lists hold one entry, so local rank 0's
   // pick is its own; a launcher's only shapes its own detect().
   if (!opt.gid.empty()) ::setenv("ACCEPT_IB_GID_INDEX", opt.gid.c_str(), 1);
   if (!opt.hca.empty())
-    ::setenv("ACCEPT_HCA", acceptance::pick_for_local_rank(opt.hca, 0).c_str(), 1);
+    ::setenv("ACCEPT_HCA", acceptance::topology::get_rank_entry(opt.hca, 0).c_str(), 1);
   if (!opt.device.empty())
-    ::setenv("ACCEPT_DEVICE", acceptance::pick_for_local_rank(opt.device, 0).c_str(), 1);
+    ::setenv("ACCEPT_DEVICE",
+             acceptance::topology::get_rank_entry(opt.device, 0).c_str(), 1);
   if (opt.local_rank >= 0)
     ::setenv("ACCEPT_LOCAL_RANK", std::to_string(opt.local_rank).c_str(), 1);
   return acceptance::run(opt);

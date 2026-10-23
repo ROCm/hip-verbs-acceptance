@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: MIT
  ************************************************************************/
 
-#include "common/Selection.hpp"
+#include "common/Topology.hpp"
 
+#include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,7 @@
 #include "common/SshLauncher.hpp"
 
 namespace acceptance {
+namespace topology {
 
 namespace {
 
@@ -25,31 +28,40 @@ int parse_ordinal(const std::string& s) {
   return std::stoi(s);
 }
 
-const GpuDevice* gpu_by_hip(const EnvironmentInfo& env, int hip) {
+// The resolved sysfs device path of `link` ("" when it does not resolve).
+std::string get_sysfs_realpath(const std::string& link) {
+  char* p = ::realpath(link.c_str(), nullptr);
+  if (p == nullptr) return std::string();
+  const std::string out(p);
+  std::free(p);
+  return out;
+}
+
+const GpuDevice* find_gpu(const EnvironmentInfo& env, int hip) {
   for (const GpuDevice& g : env.gpu_devices)
     if (g.hip_ordinal == hip) return &g;
   return nullptr;
 }
 
-bool gpu_visible(const EnvironmentInfo& env, int hip) {
+bool is_gpu_visible(const EnvironmentInfo& env, int hip) {
   // Without a KFD GPU list, the count is all there is to go on.
   if (env.gpu_devices.empty()) return hip >= 0 && hip < env.gpu_count;
-  return gpu_by_hip(env, hip) != nullptr;
+  return find_gpu(env, hip) != nullptr;
 }
 
-const RdmaDevice* nic_by_name(const EnvironmentInfo& env, const std::string& n) {
+const RdmaDevice* find_nic(const EnvironmentInfo& env, const std::string& n) {
   for (const RdmaDevice& d : env.rdma_devices)
     if (d.device == n) return &d;
   return nullptr;
 }
 
-bool nic_active(const EnvironmentInfo& env, const std::string& n) {
-  const RdmaDevice* d = nic_by_name(env, n);
+bool is_nic_active(const EnvironmentInfo& env, const std::string& n) {
+  const RdmaDevice* d = find_nic(env, n);
   return d != nullptr && d->port_state == "ACTIVE";
 }
 
 // The first NIC with an ACTIVE port, else the first NIC, else "".
-std::string first_active_nic(const EnvironmentInfo& env) {
+std::string get_first_active_nic(const EnvironmentInfo& env) {
   for (const RdmaDevice& d : env.rdma_devices)
     if (d.port_state == "ACTIVE") return d.device;
   return env.rdma_devices.empty() ? "" : env.rdma_devices.front().device;
@@ -57,7 +69,7 @@ std::string first_active_nic(const EnvironmentInfo& env) {
 
 // The lowest visible HIP ordinal whose (unambiguous) nearest NIC is `hca`, or
 // -1 when there is none.
-int gpu_nearest_to(const EnvironmentInfo& env, const std::string& hca) {
+int get_nearest_gpu(const EnvironmentInfo& env, const std::string& hca) {
   int best = -1;
   for (const GpuNicAffinity& a : env.gpu_nic_affinity) {
     if (a.nearest_nic != hca || a.ambiguous) continue;
@@ -71,24 +83,91 @@ int gpu_nearest_to(const EnvironmentInfo& env, const std::string& hca) {
 
 }  // namespace
 
-const GpuNicAffinity* affinity_for_gpu(const EnvironmentInfo& env, int gpu) {
-  const GpuDevice* g = gpu_by_hip(env, gpu);
+std::vector<GpuNicAffinity> compute_affinity(const std::vector<GpuDevice>& gpus,
+                                             const std::vector<RdmaDevice>& nics) {
+  if (gpus.empty() || nics.empty()) return {};
+
+  struct NicEntry { std::string dev; std::string path; };
+  std::vector<NicEntry> nic_entries;
+  for (const auto& nic : nics) {
+    nic_entries.push_back({nic.device, get_sysfs_realpath("/sys/class/infiniband/" +
+                                                          nic.device + "/device")});
+  }
+
+  std::vector<GpuNicAffinity> result;
+  for (const auto& gpu : gpus) {
+    GpuNicAffinity aff;
+    aff.gpu_ordinal = gpu.ordinal;
+    const std::string gpu_path =
+        gpu.bdf.empty() ? std::string()
+                        : get_sysfs_realpath("/sys/bus/pci/devices/" + gpu.bdf);
+    // Score 0 means a path did not resolve: no evidence, so no nearest NIC.
+    int best = 0;
+    for (const auto& ne : nic_entries) {
+      const int score = get_pci_shared_depth(gpu_path, ne.path);
+      if (score > best) {
+        best = score;
+        aff.nearest_nic = ne.dev;
+      }
+    }
+    // A tie means the paths can't tell the NICs apart (e.g. no PCIe switch, so
+    // every pair looks the same): record it so select_pair() doesn't trust it.
+    int at_best = 0;
+    for (const auto& ne : nic_entries)
+      if (best > 0 && get_pci_shared_depth(gpu_path, ne.path) == best) ++at_best;
+    aff.ambiguous = at_best > 1;
+    result.push_back(std::move(aff));
+  }
+  return result;
+}
+
+std::string parse_kfd_bdf(const std::string& location_id, const std::string& domain) {
+  // Strict decimal; -1 for anything else or anything above `max`.
+  auto parse = [](const std::string& s, unsigned long max) -> long {
+    if (s.empty() || s.size() > 10) return -1;
+    for (const char c : s)
+      if (c < '0' || c > '9') return -1;
+    const unsigned long v = std::stoul(s);
+    return v > max ? -1 : static_cast<long>(v);
+  };
+  const long loc = parse(location_id, 0xFFFF);
+  if (loc < 0) return std::string();
+  const long dom = domain.empty() ? 0 : parse(domain, 0xFFFF);
+  if (dom < 0) return std::string();
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%04lx:%02lx:%02lx.%lx", dom, (loc >> 8) & 0xFF,
+                (loc >> 3) & 0x1F, loc & 0x07);
+  return buf;
+}
+
+int get_pci_shared_depth(const std::string& a, const std::string& b) {
+  if (a.empty() || b.empty()) return 0;
+  std::istringstream sa(a), sb(b);
+  std::string ca, cb;
+  int depth = 0;
+  while (std::getline(sa, ca, '/') && std::getline(sb, cb, '/') && ca == cb)
+    if (!ca.empty()) ++depth;
+  return depth;
+}
+
+const GpuNicAffinity* find_gpu_affinity(const EnvironmentInfo& env, int gpu) {
+  const GpuDevice* g = find_gpu(env, gpu);
   if (g == nullptr) return nullptr;
   for (const GpuNicAffinity& a : env.gpu_nic_affinity)
     if (a.gpu_ordinal == g->ordinal) return &a;
   return nullptr;
 }
 
-Selection resolve_selection(const EnvironmentInfo& env, int local_rank,
-                            const std::string& hca, int device) {
-  Selection s;
+Pair select_pair(const EnvironmentInfo& env, int local_rank, const std::string& hca,
+                 int device) {
+  Pair s;
   std::vector<std::string> notes;
   auto gpu_name = [](int g) { return "GPU " + std::to_string(g); };
 
   // GPU.
   auto default_gpu = [&]() {
     s.gpu_source = "default";
-    if (local_rank <= 0 || gpu_visible(env, local_rank)) {
+    if (local_rank <= 0 || is_gpu_visible(env, local_rank)) {
       s.gpu = local_rank < 0 ? 0 : local_rank;
       return;
     }
@@ -98,10 +177,10 @@ Selection resolve_selection(const EnvironmentInfo& env, int local_rank,
   if (device >= 0) {
     s.gpu = device;
     s.gpu_source = "user";
-    if (!gpu_visible(env, device) && (env.gpu_count > 0 || !env.gpu_devices.empty()))
+    if (!is_gpu_visible(env, device) && (env.gpu_count > 0 || !env.gpu_devices.empty()))
       notes.push_back(gpu_name(device) + " is not visible on this host");
   } else if (!hca.empty()) {
-    const int g = gpu_nearest_to(env, hca);
+    const int g = get_nearest_gpu(env, hca);
     if (g >= 0) {
       s.gpu = g;
       s.gpu_source = "affinity";
@@ -116,21 +195,21 @@ Selection resolve_selection(const EnvironmentInfo& env, int local_rank,
   }
 
   // HCA.
-  const GpuNicAffinity* aff = affinity_for_gpu(env, s.gpu);
+  const GpuNicAffinity* aff = find_gpu_affinity(env, s.gpu);
   const bool aff_usable = aff != nullptr && !aff->nearest_nic.empty() && !aff->ambiguous;
   if (!hca.empty()) {
     s.hca = hca;
     s.hca_source = "user";
-    if (nic_by_name(env, hca) == nullptr)
+    if (find_nic(env, hca) == nullptr)
       notes.push_back("HCA " + hca + " is not present on this host");
     else if (device >= 0 && aff_usable && aff->nearest_nic != hca)
       notes.push_back("HCA " + hca + " is not the nearest NIC to " + gpu_name(s.gpu) +
                       " (nearest: " + aff->nearest_nic + ")");
-  } else if (aff_usable && nic_active(env, aff->nearest_nic)) {
+  } else if (aff_usable && is_nic_active(env, aff->nearest_nic)) {
     s.hca = aff->nearest_nic;
     s.hca_source = "affinity";
   } else {
-    s.hca = first_active_nic(env);
+    s.hca = get_first_active_nic(env);
     if (!s.hca.empty()) {
       s.hca_source = "default";
       // Only worth a note when there is a GPU whose NIC we tried to find.
@@ -152,24 +231,23 @@ Selection resolve_selection(const EnvironmentInfo& env, int local_rank,
   return s;
 }
 
-Selection selection_from_env(const EnvironmentInfo& env) {
+Pair get_rank_pair(const EnvironmentInfo& env) {
   auto get = [](const char* name) {
     const char* v = std::getenv(name);
     return std::string(v == nullptr ? "" : v);
   };
   const int local_rank = parse_ordinal(get("ACCEPT_LOCAL_RANK"));
-  return resolve_selection(env, local_rank < 0 ? 0 : local_rank,
-                           get("ACCEPT_HCA"), parse_ordinal(get("ACCEPT_DEVICE")));
+  return select_pair(env, local_rank < 0 ? 0 : local_rank, get("ACCEPT_HCA"),
+                     parse_ordinal(get("ACCEPT_DEVICE")));
 }
 
-std::string format_selection(const Selection& s) {
-  std::string line = "GPU " + std::to_string(s.gpu) + " (" + s.gpu_source + "), HCA ";
-  if (s.hca.empty()) return line + "none";
-  return line + s.hca + " (" + s.hca_source + ")";
+std::string format_pair(const Pair& p) {
+  std::string line = "GPU " + std::to_string(p.gpu) + " (" + p.gpu_source + "), HCA ";
+  if (p.hca.empty()) return line + "none";
+  return line + p.hca + " (" + p.hca_source + ")";
 }
 
-std::string validate_selection_lists(const std::string& hca,
-                                     const std::string& device, int ppn) {
+std::string validate_lists(const std::string& hca, const std::string& device, int ppn) {
   const std::vector<std::string> h = split_nodes(hca);
   const std::vector<std::string> d = split_nodes(device);
   for (const std::string& v : d) {
@@ -186,7 +264,7 @@ std::string validate_selection_lists(const std::string& hca,
   return check("--device", d.size());
 }
 
-std::string pick_for_local_rank(const std::string& list, int local_rank) {
+std::string get_rank_entry(const std::string& list, int local_rank) {
   const std::vector<std::string> v = split_nodes(list);
   if (v.empty()) return "";
   if (v.size() == 1) return v.front();
@@ -194,15 +272,16 @@ std::string pick_for_local_rank(const std::string& list, int local_rank) {
   return i < v.size() ? v[i] : v.back();
 }
 
-std::string hca() {
+std::string get_rank_hca() {
   const char* v = std::getenv("ACCEPT_HCA");
   return v == nullptr ? "" : v;
 }
 
-int gpu() {
+int get_rank_gpu() {
   const char* v = std::getenv("ACCEPT_DEVICE");
   const int g = parse_ordinal(v == nullptr ? "" : v);
   return g < 0 ? 0 : g;
 }
 
+}  // namespace topology
 }  // namespace acceptance

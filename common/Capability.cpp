@@ -280,11 +280,11 @@ std::string kfd_prop(const std::string& props, const std::string& key) {
 }
 
 // Resolve a KFD topology node's PCIe BDF from its `location_id` and `domain`
-// properties (see kfd_location_bdf). Fallback: read the "device" symlink
+// properties (see topology::parse_kfd_bdf). Fallback: read the "device" symlink
 // target's last component.
 std::string kfd_node_bdf(const std::string& node_path,
                          const std::string& props) {
-  const std::string bdf = kfd_location_bdf(kfd_prop(props, "location_id"),
+  const std::string bdf = topology::parse_kfd_bdf(kfd_prop(props, "location_id"),
                                            kfd_prop(props, "domain"));
   if (!bdf.empty()) return bdf;
   // Fallback: readlink .../device -> .../pci/devices/<bdf>
@@ -363,57 +363,6 @@ int detect_gpu_devices(std::vector<GpuDevice>& out) {
   }
   if (parsed > 0) return gpus;
   return static_cast<int>(nodes.size());
-}
-
-// The resolved sysfs device path of `link` ("" when it does not resolve).
-std::string sysfs_realpath(const std::string& link) {
-  char* p = ::realpath(link.c_str(), nullptr);
-  if (p == nullptr) return std::string();
-  const std::string out(p);
-  std::free(p);
-  return out;
-}
-
-// Compute GPU↔NIC affinity: for each GPU, the RDMA device whose sysfs PCIe
-// path shares the deepest ancestor with the GPU's (same switch beats same root
-// port beats same root complex). BDF numbering says nothing about topology, so
-// the paths are what get compared.
-std::vector<GpuNicAffinity> compute_affinity(
-    const std::vector<GpuDevice>& gpus,
-    const std::vector<RdmaDevice>& nics) {
-  if (gpus.empty() || nics.empty()) return {};
-
-  struct NicEntry { std::string dev; std::string path; };
-  std::vector<NicEntry> nic_entries;
-  for (const auto& nic : nics) {
-    nic_entries.push_back(
-        {nic.device, sysfs_realpath("/sys/class/infiniband/" + nic.device + "/device")});
-  }
-
-  std::vector<GpuNicAffinity> result;
-  for (const auto& gpu : gpus) {
-    GpuNicAffinity aff;
-    aff.gpu_ordinal = gpu.ordinal;
-    const std::string gpu_path =
-        gpu.bdf.empty() ? std::string() : sysfs_realpath("/sys/bus/pci/devices/" + gpu.bdf);
-    // Score 0 means a path did not resolve: no evidence, so no nearest NIC.
-    int best = 0;
-    for (const auto& ne : nic_entries) {
-      const int score = pci_path_shared_depth(gpu_path, ne.path);
-      if (score > best) {
-        best = score;
-        aff.nearest_nic = ne.dev;
-      }
-    }
-    // A tie means the paths can't tell the NICs apart (e.g. no PCIe switch, so
-    // every pair looks the same): record it so selection doesn't trust it.
-    int at_best = 0;
-    for (const auto& ne : nic_entries)
-      if (best > 0 && pci_path_shared_depth(gpu_path, ne.path) == best) ++at_best;
-    aff.ambiguous = at_best > 1;
-    result.push_back(std::move(aff));
-  }
-  return result;
 }
 
 // Manual GID-index override: ACCEPT_IB_GID_INDEX (set from --gid). >=0 forces
@@ -837,36 +786,6 @@ std::string decode_hip_version(int version) {
   return buf;
 }
 
-std::string kfd_location_bdf(const std::string& location_id,
-                             const std::string& domain) {
-  // Strict decimal; -1 for anything else or anything above `max`.
-  auto parse = [](const std::string& s, unsigned long max) -> long {
-    if (s.empty() || s.size() > 10) return -1;
-    for (const char c : s)
-      if (c < '0' || c > '9') return -1;
-    const unsigned long v = std::stoul(s);
-    return v > max ? -1 : static_cast<long>(v);
-  };
-  const long loc = parse(location_id, 0xFFFF);
-  if (loc < 0) return std::string();
-  const long dom = domain.empty() ? 0 : parse(domain, 0xFFFF);
-  if (dom < 0) return std::string();
-  char buf[32];
-  std::snprintf(buf, sizeof(buf), "%04lx:%02lx:%02lx.%lx", dom, (loc >> 8) & 0xFF,
-                (loc >> 3) & 0x1F, loc & 0x07);
-  return buf;
-}
-
-int pci_path_shared_depth(const std::string& a, const std::string& b) {
-  if (a.empty() || b.empty()) return 0;
-  std::istringstream sa(a), sb(b);
-  std::string ca, cb;
-  int depth = 0;
-  while (std::getline(sa, ca, '/') && std::getline(sb, cb, '/') && ca == cb)
-    if (!ca.empty()) ++depth;
-  return depth;
-}
-
 std::optional<std::string> find_info_version(const std::string& start_dir,
                                               int max_levels) {
   if (const auto hit = locate_info_version(start_dir, max_levels)) {
@@ -917,7 +836,7 @@ EnvironmentInfo probe_env() {
   env.gpu_count = detect_gpu_devices(env.gpu_devices);
 
   // --- GPU↔NIC affinity (deepest shared PCIe ancestor) --------------------
-  env.gpu_nic_affinity = compute_affinity(env.gpu_devices, env.rdma_devices);
+  env.gpu_nic_affinity = topology::compute_affinity(env.gpu_devices, env.rdma_devices);
 
   // --- kernel (uname) ----------------------------------------------------
   struct utsname uts;
@@ -952,12 +871,13 @@ EnvironmentInfo detect() {
   EnvironmentInfo env =
       std::getenv("ACCEPT_FAKE_ENV") != nullptr ? fake_env() : probe_env();
 
-  // GPU/HCA selection (--hca / --device / local rank; see Selection.hpp). The
-  // HCA moves to the front so vendor detection, the GID and "first device"
-  // readers describe the NIC actually used (mirrors RCCL's NCCL_IB_HCA).
-  env.selection = selection_from_env(env);
+  // This rank's GPU/HCA pair (--hca / --device / local rank; see
+  // Topology.hpp). The HCA moves to the front so vendor detection, the GID and
+  // "first device" readers describe the NIC actually used (mirrors RCCL's
+  // NCCL_IB_HCA).
+  env.rank_pair = topology::get_rank_pair(env);
   for (std::size_t i = 1; i < env.rdma_devices.size(); ++i) {
-    if (env.rdma_devices[i].device == env.selection.hca) {
+    if (env.rdma_devices[i].device == env.rank_pair.hca) {
       std::rotate(env.rdma_devices.begin(), env.rdma_devices.begin() + i,
                   env.rdma_devices.begin() + i + 1);
       vendor_from_device(env.rdma_devices.front().device, env.vendor,
@@ -1021,12 +941,12 @@ std::string EnvironmentInfo::to_kv() const {
     out << p << "nearest_nic=" << kv_safe(a.nearest_nic) << "\n";
     out << p << "ambiguous=" << (a.ambiguous ? "true" : "false") << "\n";
   }
-  out << "sel.hca=" << kv_safe(selection.hca) << "\n";
-  out << "sel.gpu=" << TestResult::int_to_chars(selection.gpu) << "\n";
-  out << "sel.hca_source=" << kv_safe(selection.hca_source) << "\n";
-  out << "sel.gpu_source=" << kv_safe(selection.gpu_source) << "\n";
-  out << "sel.local=" << (selection.local ? "true" : "false") << "\n";
-  out << "sel.note=" << kv_safe(selection.note) << "\n";
+  out << "pair.hca=" << kv_safe(rank_pair.hca) << "\n";
+  out << "pair.gpu=" << TestResult::int_to_chars(rank_pair.gpu) << "\n";
+  out << "pair.hca_source=" << kv_safe(rank_pair.hca_source) << "\n";
+  out << "pair.gpu_source=" << kv_safe(rank_pair.gpu_source) << "\n";
+  out << "pair.local=" << (rank_pair.local ? "true" : "false") << "\n";
+  out << "pair.note=" << kv_safe(rank_pair.note) << "\n";
   return out.str();
 }
 
@@ -1068,12 +988,12 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
     else if (key == "os")           env.os = val;
     else if (key == "gpu_model")    env.gpu_model = val;
     else if (key == "driver_version") env.driver_version = val;
-    else if (key == "sel.hca")        env.selection.hca = val;
-    else if (key == "sel.gpu")        env.selection.gpu = to_int(val, 0);
-    else if (key == "sel.hca_source") env.selection.hca_source = val;
-    else if (key == "sel.gpu_source") env.selection.gpu_source = val;
-    else if (key == "sel.local")      env.selection.local = (val == "true");
-    else if (key == "sel.note")       env.selection.note = val;
+    else if (key == "pair.hca")        env.rank_pair.hca = val;
+    else if (key == "pair.gpu")        env.rank_pair.gpu = to_int(val, 0);
+    else if (key == "pair.hca_source") env.rank_pair.hca_source = val;
+    else if (key == "pair.gpu_source") env.rank_pair.gpu_source = val;
+    else if (key == "pair.local")      env.rank_pair.local = (val == "true");
+    else if (key == "pair.note")       env.rank_pair.note = val;
     else if (key.compare(0, 4, "sym.") == 0) {
       // sym.<name>=true|false
       const std::string name = key.substr(4);

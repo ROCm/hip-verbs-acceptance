@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-#include "common/Selection.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -115,9 +115,9 @@ struct EnvironmentInfo {
   // HIP enrichment (only populated under ACCEPT_HAVE_HIP). The default
   // sysfs-only build leaves this empty.
   std::string gpu_model;       // props.gcnArchName (and/or props.name)
-  // The GPU/HCA pair this rank resolved (see common/Selection.hpp). Set by
+  // The GPU/HCA pair this rank resolved (see common/Topology.hpp). Set by
   // detect(); its HCA is also moved to the front of rdma_devices.
-  Selection   selection;
+  topology::Pair rank_pair;
 
   // Flat key=value serialization (see file header). Deterministic ordering:
   // scalars first, then each rdma device in index order.
@@ -133,17 +133,6 @@ struct EnvironmentInfo {
 // "major.minor.patch". Returns an empty string for a non-positive input. Pure
 // arithmetic, no HIP dependency -- unit-testable without HIP.
 std::string decode_hip_version(int version);
-
-// A KFD topology node's PCIe BDF ("dddd:bb:dd.f") from its `location_id` and
-// `domain` properties. KFD prints both in decimal; location_id is the PCI
-// device id, (bus << 8) | devfn. "" when location_id is not a number.
-std::string kfd_location_bdf(const std::string& location_id,
-                             const std::string& domain);
-
-// How many leading components two sysfs device paths share
-// ("/sys/devices/pci0000:00/0000:00:01.1/..."): the deeper the shared PCIe
-// ancestor, the closer the devices. 0 when either path is empty.
-int pci_path_shared_depth(const std::string& a, const std::string& b);
 
 // Walk from `start_dir` up through at most `max_levels` parent directories
 // (start_dir itself is level 0) looking for "<dir>/.info/version". Returns the

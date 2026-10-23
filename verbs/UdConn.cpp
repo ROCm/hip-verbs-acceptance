@@ -16,7 +16,7 @@
 #include <cstring>
 
 #include "common/Capability.hpp"
-#include "common/Selection.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 namespace verbsx {
@@ -56,9 +56,9 @@ UdConn::~UdConn() {
 std::string UdConn::open(const std::string& dev_name, bool& no_device) {
   no_device = false;
   // Empty dev_name means "auto-select": open this rank's selected HCA
-  // (ACCEPT_HCA, see Selection.hpp) -- the device the environment report and
+  // (ACCEPT_HCA, see Topology.hpp) -- the device the environment report and
   // its GID lookup name -- so the connect path uses that NIC too.
-  std::string target = dev_name.empty() ? ::acceptance::hca() : dev_name;
+  std::string target = dev_name.empty() ? topology::get_rank_hca() : dev_name;
   int num = 0;
   struct ibv_device** list = ibv_get_device_list(&num);
   if (list == nullptr) return errno_str("ibv_get_device_list failed");

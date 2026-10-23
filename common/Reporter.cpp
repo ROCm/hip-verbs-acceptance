@@ -530,17 +530,17 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << ", \"nearest_nic\": " << jstr_or_null(a.nearest_nic)
           << ", \"ambiguous\": " << jbool(a.ambiguous) << "}";
     }
-    const Selection& sel = env.selection;
+    const topology::Pair& pair = env.rank_pair;
     nodes_json
         << "]"
         << "\n      },"
-        << "\n      \"selection\": {"
-        << "\n        \"hca\": "        << jstr_or_null(sel.hca) << ","
-        << "\n        \"gpu\": "        << jnum(static_cast<long long>(sel.gpu)) << ","
-        << "\n        \"hca_source\": " << jstr_or_null(sel.hca_source) << ","
-        << "\n        \"gpu_source\": " << jstr_or_null(sel.gpu_source) << ","
-        << "\n        \"local\": "      << jbool(sel.local) << ","
-        << "\n        \"note\": "       << jstr_or_null(sel.note)
+        << "\n      \"topology\": {"
+        << "\n        \"hca\": "        << jstr_or_null(pair.hca) << ","
+        << "\n        \"gpu\": "        << jnum(static_cast<long long>(pair.gpu)) << ","
+        << "\n        \"hca_source\": " << jstr_or_null(pair.hca_source) << ","
+        << "\n        \"gpu_source\": " << jstr_or_null(pair.gpu_source) << ","
+        << "\n        \"local\": "      << jbool(pair.local) << ","
+        << "\n        \"note\": "       << jstr_or_null(pair.note)
         << "\n      }"
         << "\n    }";
   }

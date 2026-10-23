@@ -54,8 +54,8 @@
 
 #include "common/Bootstrap.hpp"
 #include "common/Capability.hpp"
-#include "common/Selection.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -361,7 +361,7 @@ ACCEPT_TEST(vat_rc_qp_reset_recovery_loopback, "verbs/recovery", Topology::Singl
   }
   struct ibv_device* dev = nullptr;
   struct ibv_context* dctx = nullptr;
-  if (const std::string want = hca(); !want.empty()) {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     for (int i = 0; i < num_devs; ++i) {
       const char* name = ibv_get_device_name(dev_list[i]);
       if (name != nullptr && want == std::string(name)) { dev = dev_list[i]; break; }
@@ -750,7 +750,7 @@ ACCEPT_TEST(vat_ionic_sq_sig_all, "verbs/recovery", Topology::Single,
   // Honor the selected HCA (ACCEPT_HCA) like RcConn::open() does, else the first
   // enumerated device.
   int idx = 0;
-  if (const std::string want = hca(); !want.empty()) {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     idx = -1;
     for (int i = 0; i < num; ++i) {
       const char* name = ibv_get_device_name(list[i]);

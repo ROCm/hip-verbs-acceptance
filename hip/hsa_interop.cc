@@ -31,8 +31,8 @@ namespace acceptance {
 namespace {
 
 struct AgentSearch {
-  // gpu()'s PCI address: (bus << 8) | (device << 3), function ignored (HIP
-  // does not report it), and the domain.
+  // The rank GPU's PCI address: (bus << 8) | (device << 3), function ignored
+  // (HIP does not report it), and the domain.
   uint32_t want_bdf = 0;
   uint32_t want_domain = 0;
   hsa_agent_t gpu;
@@ -101,19 +101,20 @@ ACCEPT_TEST(Hsa_MemoryPool_LockHostToPool, "hip/hsa", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(gpu()));  // ensures the HSA runtime is initialized
+  const int gpu = topology::get_rank_gpu();
+  HIP_CHECK(hipSetDevice(gpu));  // ensures the HSA runtime is initialized
 
-  // The HSA agent for gpu(): HSA agents are not renumbered by
+  // The HSA agent for `gpu`: HSA agents are not renumbered by
   // HIP_VISIBLE_DEVICES, so match on the PCI address.
   int bus = 0, dev = 0, domain = 0;
-  HIP_CHECK(hipDeviceGetAttribute(&bus, hipDeviceAttributePciBusId, gpu()));
-  HIP_CHECK(hipDeviceGetAttribute(&dev, hipDeviceAttributePciDeviceId, gpu()));
-  HIP_CHECK(hipDeviceGetAttribute(&domain, hipDeviceAttributePciDomainID, gpu()));
+  HIP_CHECK(hipDeviceGetAttribute(&bus, hipDeviceAttributePciBusId, gpu));
+  HIP_CHECK(hipDeviceGetAttribute(&dev, hipDeviceAttributePciDeviceId, gpu));
+  HIP_CHECK(hipDeviceGetAttribute(&domain, hipDeviceAttributePciDomainID, gpu));
   AgentSearch as{};
   as.want_bdf = (static_cast<uint32_t>(bus) << 8) | (static_cast<uint32_t>(dev) << 3);
   as.want_domain = static_cast<uint32_t>(domain);
   (void)hsa_iterate_agents(collect_agents, &as);
-  if (!as.gpu_found) return skip("no HSA GPU agent matches GPU " + std::to_string(gpu()));
+  if (!as.gpu_found) return skip("no HSA GPU agent matches GPU " + std::to_string(gpu));
   if (!as.cpu_found) return skip("no HSA CPU agent found");
 
   // Host memory locks into a CPU/system coarse-grained pool; the GPU agent is
