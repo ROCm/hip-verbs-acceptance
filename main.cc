@@ -542,9 +542,15 @@ void make_gpu_current(int g) {
 // Resolve this rank's GPU and HCA (detect()), say why if a fallback was
 // taken, make the GPU current, and publish the pair for hca()/gpu() and the
 // --exec children. Only for processes that run tests: a launcher's resolved
-// pair would leak into its workers' inherited / forwarded environment.
-void apply_selection() {
+// pair would leak into its workers' inherited / forwarded environment. The
+// header goes to stderr: a worker's stdout carries its results. The launcher
+// only shows a worker's stderr on failure and prints the pair itself.
+void apply_selection(const Options& opt, bool worker) {
   const Selection& sel = environment().selection;
+  if (!opt.quiet) {
+    const std::string who = worker ? "rank " + std::to_string(opt.rank) + ": " : "";
+    std::fprintf(stderr, "selection: %s%s\n", who.c_str(), format_selection(sel).c_str());
+  }
   if (!sel.note.empty()) std::fprintf(stderr, "note: %s\n", sel.note.c_str());
   if (!sel.hca.empty()) ::setenv("ACCEPT_HCA", sel.hca.c_str(), 1);
   ::setenv("ACCEPT_DEVICE", std::to_string(sel.gpu).c_str(), 1);
@@ -686,11 +692,14 @@ std::string gpu_platform_key(const std::string& gpu_model) {
 //  2. --vendor <name>  — selects <binary_dir>/policy/<name>.csv
 //  3. auto-detected platform -> prefer <binary_dir>/policy/<gpu>_<nic>.csv
 //     (e.g. mi350_thor.csv), else fall back to <nic>.csv, else discovery.
+//     With GPUs but no known NIC: <gpu>.csv (e.g. mi350.csv; gpu.csv for an
+//     unmapped arch), else discovery. With neither: synthetic.csv.
 std::string resolve_vendor(const Options& opt) {
   if (!opt.vendor.empty()) return opt.vendor;
-  const std::string& v = environment().vendor;
+  const EnvironmentInfo& env = environment();
+  const std::string& v = env.vendor;
+  const std::string gpu = gpu_platform_key(env.gpu_model);
   if (v == "connectx" || v == "thor" || v == "ionic") {
-    const std::string gpu = gpu_platform_key(environment().gpu_model);
     if (!gpu.empty()) {
       const std::string combined = gpu + "_" + v;  // e.g. "mi350_ionic"
       std::ifstream probe(binary_dir() + "/policy/" + combined + ".csv");
@@ -698,6 +707,9 @@ std::string resolve_vendor(const Options& opt) {
     }
     return v;  // fall back to the bare NIC policy (or discovery if absent)
   }
+  // A GPU-only host must not land on synthetic.csv: it lists no real test,
+  // so every HIP test would be silently excluded.
+  if (env.gpu_count > 0 || !env.gpu_devices.empty()) return gpu.empty() ? "gpu" : gpu;
   return "synthetic";
 }
 
@@ -993,7 +1005,7 @@ int do_worker(const Options& opt) {
                  opt.size);
     return 2;
   }
-  apply_selection();
+  apply_selection(opt, /*worker=*/true);
 
   // Construct bootstrap; failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
@@ -1350,6 +1362,18 @@ int do_launch(const Options& opt) {
     }
   }
 
+  // Workers' stderr is only shown on failure, so print each rank's pair (from
+  // its @env block) ahead of the per-test lines.
+  if (!opt.quiet) {
+    for (const auto& n : in.nodes) {
+      const Selection& sel = n.environment.selection;
+      std::fprintf(stderr, "selection: rank %d on %s: %s\n", n.rank, n.host.c_str(),
+                   format_selection(sel).c_str());
+      if (!sel.note.empty())
+        std::fprintf(stderr, "note: rank %d: %s\n", n.rank, sel.note.c_str());
+    }
+  }
+
   return finalize_report(opt, policy, in);
 }
 
@@ -1380,7 +1404,7 @@ int run(const Options& opt) {
       // rank on another host, go through the launcher; a single local rank
       // runs in-process: worker + policy + Reporter -> report.json + gate.
       if (!opt.lint && needs_launch(opt)) return do_launch(opt);
-      if (!opt.lint) apply_selection();
+      if (!opt.lint) apply_selection(opt, /*worker=*/false);
       return do_run(opt);
   }
   return 0;

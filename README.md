@@ -61,8 +61,16 @@ overrides), NIC = that GPU's nearest ACTIVE NIC (`--hca` overrides). Both flags
 take one value or one per local rank, e.g. `-n 2 --device 0,4` or
 `-n 2 --hca bnxt_re0,bnxt_re1`; `--hca` alone picks the GPU nearest to it. When
 affinity is unknown (or ties), the first ACTIVE NIC is used and a `note:` line
-says why. Each node's `selection` in `report.json` records the pair. Pinning
-both ranks to one NIC (`--hca bnxt_re0`) makes it a single-NIC loopback check.
+says why. A `selection:` line per rank prints the pair before the test lines
+(e.g. `selection: rank 1 on node1: GPU 1 (default), HCA bnxt_re1 (affinity)`),
+and each node's `selection` in `report.json` records it. Pinning both ranks to
+one NIC (`--hca bnxt_re0`) makes it a single-NIC loopback check.
+
+A GPU-only host (no RDMA device) prints `HCA none` and can run the HIP tests:
+`hva --filter-category 'hip/*' --vendor mi350_thor` (or any policy for that
+GPU). Without `--vendor`/`--policy` it looks for `policy/<gpu>.csv`, else runs
+in discovery mode. The verbs tests skip there, which fails a `MUST_PASS` gate,
+so filter them out.
 
 Across two real nodes (rank 0 listens on the first host, rank 1 is launched by
 the selected `--remote-launcher`; binary + policy must be at the **same

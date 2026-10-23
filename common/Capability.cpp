@@ -915,7 +915,7 @@ EnvironmentInfo probe_env() {
   // --- GPU devices + count (KFD topology, dep-free sysfs) -------------------
   env.gpu_count = detect_gpu_devices(env.gpu_devices);
 
-  // --- GPU↔NIC affinity (nearest PCIe BDF prefix) -------------------------
+  // --- GPU↔NIC affinity (deepest shared PCIe ancestor) --------------------
   env.gpu_nic_affinity = compute_affinity(env.gpu_devices, env.rdma_devices);
 
   // --- kernel (uname) ----------------------------------------------------

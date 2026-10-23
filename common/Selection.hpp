@@ -54,6 +54,10 @@ Selection resolve_selection(const EnvironmentInfo& env, int local_rank,
 // ACCEPT_LOCAL_RANK (unset or malformed => not given / 0).
 Selection selection_from_env(const EnvironmentInfo& env);
 
+// One line for the pre-run header, e.g. "GPU 0 (default), HCA bnxt_re0
+// (affinity)", or "..., HCA none" on a host without RDMA devices.
+std::string format_selection(const Selection& s);
+
 // The affinity entry for HIP ordinal `gpu`, or nullptr when unknown.
 const GpuNicAffinity* affinity_for_gpu(const EnvironmentInfo& env, int gpu);
 

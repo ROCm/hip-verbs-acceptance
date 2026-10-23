@@ -7,7 +7,8 @@
 // unit_selection — unit tests for the per-rank GPU / HCA selection
 // (common/Selection.*): resolve_selection over hand-built environments
 // (affinity, ties, no affinity, non-visible GPUs, HIP vs KFD ordinals, an
-// inactive nearest NIC), validate_selection_lists, pick_for_local_rank and the
+// inactive nearest NIC), format_selection, validate_selection_lists,
+// pick_for_local_rank and the
 // ACCEPT_HCA / ACCEPT_DEVICE readers.
 
 #include <cstdlib>
@@ -163,7 +164,18 @@ void test_no_affinity() {
     env.rdma_devices.clear();
     const Selection s = resolve_selection(env, 0, "", -1);
     CHECK(s.hca.empty() && s.hca_source.empty() && !s.local, "no NICs -> no HCA");
+    CHECK(s.note.empty(), "no NICs -> no note");
+    CHECK_EQ_STR(format_selection(s), std::string("GPU 0 (default), HCA none"),
+                 "header without NICs");
   }
+}
+
+void test_format_selection() {
+  const EnvironmentInfo env = two_nic_env();
+  CHECK_EQ_STR(format_selection(resolve_selection(env, 0, "", -1)),
+               std::string("GPU 0 (default), HCA n0 (affinity)"), "default header");
+  CHECK_EQ_STR(format_selection(resolve_selection(env, 0, "n1", 2)),
+               std::string("GPU 2 (user), HCA n1 (user)"), "user header");
 }
 
 void test_hip_ordinals() {
@@ -234,6 +246,7 @@ void run_selection_tests() {
   test_user_choices();
   test_inactive_and_ambiguous();
   test_no_affinity();
+  test_format_selection();
   test_hip_ordinals();
   test_validate_selection_lists();
   test_pick_for_local_rank();

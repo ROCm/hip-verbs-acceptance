@@ -307,7 +307,9 @@ worker its own entry plus `--local-rank`. "Nearest" is the NIC whose sysfs
 PCIe path shares the deepest ancestor with the GPU's (same switch beats same
 root port); a tie (`ambiguous`) or no affinity falls back to the
 first ACTIVE NIC with a `note` — never an error. HIP ordinals are mapped to KFD
-GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. The rank
+GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. A
+`selection:` line on stderr shows the pair before the test lines (a launcher
+prints it for every rank from the workers' `@env` blocks). The rank
 then `hipSetDevice()`s its GPU and publishes the pair as `ACCEPT_HCA` /
 `ACCEPT_DEVICE`, which the verbs device-open paths and the HIP tests read
 (`hca()` / `gpu()`) and the isolated `--exec` children inherit; each child
@@ -828,7 +830,8 @@ hva -n 2 [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
            [--filter-class <class>]         # select by policy class
            [--filter-category <glob>]       # select by ACCEPT_TEST category field
            [--policy ./policy/thor.csv]     # direct path to policy CSV; auto-selected from
-                                            # <binary_dir>/policy/<gpu>_<nic>.csv → <nic>.csv;
+                                            # <binary_dir>/policy/<gpu>_<nic>.csv → <nic>.csv
+                                            # (no NIC: <gpu>.csv);
                                             # missing → WARN + all MUST_PASS (gate active)
            [--vendor <name>]                # override vendor auto-detection
            [--report ./report.json]         # always the full report (no --verbose)

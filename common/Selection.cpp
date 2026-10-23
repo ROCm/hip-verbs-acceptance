@@ -162,6 +162,12 @@ Selection selection_from_env(const EnvironmentInfo& env) {
                            get("ACCEPT_HCA"), parse_ordinal(get("ACCEPT_DEVICE")));
 }
 
+std::string format_selection(const Selection& s) {
+  std::string line = "GPU " + std::to_string(s.gpu) + " (" + s.gpu_source + "), HCA ";
+  if (s.hca.empty()) return line + "none";
+  return line + s.hca + " (" + s.hca_source + ")";
+}
+
 std::string validate_selection_lists(const std::string& hca,
                                      const std::string& device, int ppn) {
   const std::vector<std::string> h = split_nodes(hca);
