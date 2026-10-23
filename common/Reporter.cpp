@@ -462,6 +462,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << "\n            \"gid_index\": "
           << jnum(static_cast<long long>(d.gid_index)) << ","
           << "\n            \"gid_type\": "  << jstr_or_null(d.gid_type) << ","
+          << "\n            \"port_state\": " << jstr_or_null(d.port_state) << ","
           // vendor_id/vendor_part_id are -1 when not queried (default build):
           // emit null in that case, the numeric value otherwise.
           << "\n            \"vendor_id\": "
@@ -512,6 +513,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << (j ? "," : "")
           << "\n          {"
           << "\n            \"ordinal\": "   << jnum(static_cast<long long>(g.ordinal)) << ","
+          << "\n            \"hip_ordinal\": " << jnum(static_cast<long long>(g.hip_ordinal)) << ","
           << "\n            \"bdf\": "       << jstr_or_null(g.bdf) << ","
           << "\n            \"numa_node\": " << jnum(static_cast<long long>(g.numa_node)) << ","
           << "\n            \"arch\": "      << jstr_or_null(g.arch)
@@ -525,10 +527,20 @@ int write_report(const Policy& policy, const ReportInputs& in,
       nodes_json
           << (j ? "," : "")
           << " {\"gpu\": " << jnum(static_cast<long long>(a.gpu_ordinal))
-          << ", \"nearest_nic\": " << jstr_or_null(a.nearest_nic) << "}";
+          << ", \"nearest_nic\": " << jstr_or_null(a.nearest_nic)
+          << ", \"ambiguous\": " << jbool(a.ambiguous) << "}";
     }
+    const Selection& sel = env.selection;
     nodes_json
         << "]"
+        << "\n      },"
+        << "\n      \"selection\": {"
+        << "\n        \"hca\": "        << jstr_or_null(sel.hca) << ","
+        << "\n        \"gpu\": "        << jnum(static_cast<long long>(sel.gpu)) << ","
+        << "\n        \"hca_source\": " << jstr_or_null(sel.hca_source) << ","
+        << "\n        \"gpu_source\": " << jstr_or_null(sel.gpu_source) << ","
+        << "\n        \"local\": "      << jbool(sel.local) << ","
+        << "\n        \"note\": "       << jstr_or_null(sel.note)
         << "\n      }"
         << "\n    }";
   }

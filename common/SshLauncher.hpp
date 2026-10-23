@@ -132,7 +132,7 @@ std::vector<std::string> split_nodes(const std::string& csv);
 //
 // --forward-env LIST is a comma-separated list of environment variable names
 // forwarded from the launcher to the ssh worker. A trailing '*' turns an
-// entry into a prefix match (e.g. "ACCEPT_*" matches "ACCEPT_IB_DEVICE" but
+// entry into a prefix match (e.g. "ACCEPT_*" matches "ACCEPT_HCA" but
 // not "ACCEPTX"). Only variables actually set in the launcher's own
 // environment are ever forwarded.
 

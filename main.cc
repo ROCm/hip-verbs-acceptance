@@ -94,7 +94,8 @@ struct Options {
   std::string perf_csv;            // --perf-csv <file> (metrics as CSV)
   std::string vendor;              // --vendor <name> (overrides auto-detection)
   std::string gid;                 // --gid <index> (override RoCE GID index)
-  std::string device;              // --device <name> (prefer this RDMA device)
+  std::string hca;                 // --hca <name>[,<name>] (RDMA device per local rank)
+  std::string device;              // --device <n>[,<n>] (GPU HIP ordinal per local rank)
   std::string results_out;         // --results-out <path>
   bool quiet = false;              // --quiet (summary only; no per-test console lines)
   bool lint = false;               // --lint: report unlisted tests, no run
@@ -104,6 +105,7 @@ struct Options {
   int         rank = 0;             // --rank N
   int         size = 1;             // --size M
   std::string rendezvous;           // --rendezvous HOST:PORT
+  int         local_rank = -1;      // --local-rank N (-1 = not given)
 
   // Launcher (mpirun-style). Ranks on this host are fork/exec'd; ranks on
   // other hosts are started over ssh or srun.
@@ -179,7 +181,12 @@ void print_usage(std::FILE* out) {
     "  --vendor <name>         Override vendor auto-detection (affects auto policy\n"
     "                          file selection; lower priority than --policy)\n"
     "  --gid <index>           Force the RoCE GID index (override auto-selection)\n"
-    "  --device <name>         Prefer this RDMA device (e.g. bnxt_re0 / rdma0)\n"
+    "  --hca <name>[,...]      RDMA device to use (e.g. bnxt_re0 / rdma0): one,\n"
+    "                          or one per local rank (-ppn). Default: the GPU's\n"
+    "                          nearest ACTIVE NIC, else the first ACTIVE NIC.\n"
+    "  --device <n>[,...]      GPU (HIP ordinal) to use: one, or one per local\n"
+    "                          rank. Default: the nearest GPU to --hca if given,\n"
+    "                          else the local rank.\n"
     "  --report <file>         Where to write report.json (default: CWD)\n"
     "  --perf-csv <file>       Also write the measured metrics as CSV (needs\n"
     "                          --kind perf|all to have anything to write)\n"
@@ -224,6 +231,7 @@ void print_usage(std::FILE* out) {
     "                        ssh launcher only)\n"
     "  --worker              Run one rank (spawned by the launcher)\n"
     "  --rank <n>            This worker's rank\n"
+    "  --local-rank <n>      This worker's rank on its host\n"
     "  --size <n>            Total rank count (1 or 2)\n"
     "  --rendezvous H:P      Rank-0 listener host:port for the socket bootstrap\n"
     "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n"
@@ -345,6 +353,9 @@ int parse_args(int argc, char** argv, Options& opt) {
       }
       opt.gid = std::to_string(v);
       if (opt.mode == Mode::None) opt.mode = Mode::Run;
+    } else if (a == "--hca") {
+      if (!take_value(argc, argv, i, "--hca", opt.hca)) return 2;
+      if (opt.mode == Mode::None) opt.mode = Mode::Run;
     } else if (a == "--device") {
       if (!take_value(argc, argv, i, "--device", opt.device)) return 2;
       if (opt.mode == Mode::None) opt.mode = Mode::Run;
@@ -358,6 +369,14 @@ int parse_args(int argc, char** argv, Options& opt) {
       long v = 0;
       if (!take_int(argc, argv, i, "--rank", v)) return 2;
       opt.rank = static_cast<int>(v);
+    } else if (a == "--local-rank") {
+      long v = 0;
+      if (!take_int(argc, argv, i, "--local-rank", v)) return 2;
+      if (v < 0) {
+        std::fprintf(stderr, "error: --local-rank must be >= 0 (got %ld)\n", v);
+        return 2;
+      }
+      opt.local_rank = static_cast<int>(v);
     } else if (a == "--size") {
       long v = 0;
       if (!take_int(argc, argv, i, "--size", v)) return 2;
@@ -443,6 +462,15 @@ int parse_args(int argc, char** argv, Options& opt) {
     std::fprintf(stderr, "error: %s\n", err.c_str());
     return 2;
   }
+  // A worker gets its own entries already picked.
+  if (const std::string err = validate_selection_lists(
+          opt.hca, opt.device,
+          opt.worker ? 1
+                     : effective_ppn(opt.np, opt.ppn, split_nodes(opt.hosts).size()));
+      !err.empty()) {
+    std::fprintf(stderr, "error: %s\n", err.c_str());
+    return 2;
+  }
 
   // --forward-env / --no-forward-env. Reject the combination outright
   // rather than picking a silent last-flag-wins precedence: the two flags
@@ -497,6 +525,32 @@ int parse_args(int argc, char** argv, Options& opt) {
 }
 
 // --list: one line per registered test with its metadata.
+// hipSetDevice(g) when the HIP runtime is there; a GPU that is not visible is
+// left to the tests to report.
+void make_gpu_current(int g) {
+#ifdef ACCEPT_HAVE_HIP
+  if (!hipw::init_result().hip_lib_loaded) return;
+  try {
+    (void)hipSetDevice(g);
+  } catch (const hipw::MissingSymbol&) {
+  }
+#else
+  (void)g;
+#endif
+}
+
+// Resolve this rank's GPU and HCA (detect()), say why if a fallback was
+// taken, make the GPU current, and publish the pair for hca()/gpu() and the
+// --exec children. Only for processes that run tests: a launcher's resolved
+// pair would leak into its workers' inherited / forwarded environment.
+void apply_selection() {
+  const Selection& sel = environment().selection;
+  if (!sel.note.empty()) std::fprintf(stderr, "note: %s\n", sel.note.c_str());
+  if (!sel.hca.empty()) ::setenv("ACCEPT_HCA", sel.hca.c_str(), 1);
+  ::setenv("ACCEPT_DEVICE", std::to_string(sel.gpu).c_str(), 1);
+  make_gpu_current(sel.gpu);
+}
+
 int do_list() {
   for (const auto& m : TestRegistry::all()) {
     std::printf("%s  [%s, %s, %s, timeout=%ds]\n",
@@ -933,6 +987,7 @@ int do_worker(const Options& opt) {
                  opt.size);
     return 2;
   }
+  apply_selection();
 
   // Construct bootstrap; failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
@@ -1159,6 +1214,7 @@ int do_launch(const Options& opt) {
   wp.isolate          = opt.isolate;
   wp.isolate_explicit = opt.isolate_explicit;
   wp.gid              = opt.gid;
+  wp.hca              = opt.hca;
   wp.device           = opt.device;
   // Bound every worker to the SAME deadline this launcher uses for its own
   // wait (launch_timeout), plus headroom so the launcher's own timeout/kill
@@ -1305,6 +1361,8 @@ int run(const Options& opt) {
       return do_list();
 
     case Mode::Exec:
+      // The parent published its resolved pair; no need to detect() again.
+      make_gpu_current(gpu());
       return do_exec(opt);
 
     case Mode::Worker:
@@ -1317,6 +1375,7 @@ int run(const Options& opt) {
       // rank on another host, go through the launcher; a single local rank
       // runs in-process: worker + policy + Reporter -> report.json + gate.
       if (!opt.lint && needs_launch(opt)) return do_launch(opt);
+      if (!opt.lint) apply_selection();
       return do_run(opt);
   }
   return 0;
@@ -1372,11 +1431,19 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  // Publish --gid/--device as env vars BEFORE any detect()/device open. setenv
-  // propagates to forked --exec/--worker children automatically (they inherit
-  // the environment); launched workers get them forwarded as flags (see
-  // build_worker_args). Capability reads ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE.
+  // Publish --gid/--hca/--device/--local-rank as env vars BEFORE any
+  // detect()/device open. setenv propagates to forked --exec children (they
+  // inherit the environment); launched workers get their own entries as flags
+  // (see build_worker_args). Capability reads ACCEPT_IB_GID_INDEX, and
+  // detect() resolves the selection from ACCEPT_HCA/ACCEPT_DEVICE/
+  // ACCEPT_LOCAL_RANK. A worker's lists hold one entry, so local rank 0's
+  // pick is its own; a launcher's only shapes its own detect().
   if (!opt.gid.empty()) ::setenv("ACCEPT_IB_GID_INDEX", opt.gid.c_str(), 1);
-  if (!opt.device.empty()) ::setenv("ACCEPT_IB_DEVICE", opt.device.c_str(), 1);
+  if (!opt.hca.empty())
+    ::setenv("ACCEPT_HCA", acceptance::pick_for_local_rank(opt.hca, 0).c_str(), 1);
+  if (!opt.device.empty())
+    ::setenv("ACCEPT_DEVICE", acceptance::pick_for_local_rank(opt.device, 0).c_str(), 1);
+  if (opt.local_rank >= 0)
+    ::setenv("ACCEPT_LOCAL_RANK", std::to_string(opt.local_rank).c_str(), 1);
   return acceptance::run(opt);
 }

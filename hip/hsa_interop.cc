@@ -85,7 +85,7 @@ ACCEPT_TEST(Hsa_MemoryPool_LockHostToPool, "hip/hsa", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(0));  // ensures the HSA runtime is initialized
+  HIP_CHECK(hipSetDevice(gpu()));  // ensures the HSA runtime is initialized
 
   AgentSearch as{};
   (void)hsa_iterate_agents(collect_agents, &as);

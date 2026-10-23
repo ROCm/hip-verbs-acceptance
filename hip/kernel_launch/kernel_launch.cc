@@ -362,10 +362,10 @@ ACCEPT_TEST(Launch_Cooperative_AfterQueueReclaim, "hip/launch", Topology::Single
   if (stream_count == 0) return skip(skip_reason);
   const std::string reclaim_disabled = queue_reclaim_disabled();
 
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
   int cooperative_supported = 0;
   HIP_CHECK(hipDeviceGetAttribute(&cooperative_supported,
-                                  hipDeviceAttributeCooperativeLaunch, 0));
+                                  hipDeviceAttributeCooperativeLaunch, gpu()));
   if (cooperative_supported == 0)
     return skip("device does not support cooperative launch");
 

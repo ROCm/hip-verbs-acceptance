@@ -36,11 +36,17 @@
 #include <string>
 #include <vector>
 
+#include "common/Selection.hpp"
+
 namespace acceptance {
 
 // One GPU device discovered from the KFD topology.
 struct GpuDevice {
   int         ordinal = 0;   // 0-based index (order of KFD topology node)
+  // HIP ordinal (hipSetDevice / --device numbering, relative to
+  // HIP_VISIBLE_DEVICES); -1 when HIP doesn't see this GPU. Equals `ordinal`
+  // when HIP isn't loaded.
+  int         hip_ordinal = -1;
   std::string bdf;           // PCIe bus-device-function, e.g. "0000:1a:00.0"
   int         numa_node = -1; // /sys/bus/pci/devices/<bdf>/numa_node (-1 = unknown)
   std::string arch;          // e.g. "gfx942" (from KFD props or HIP enrichment)
@@ -48,8 +54,9 @@ struct GpuDevice {
 
 // Nearest-NIC affinity for one GPU (nearest by PCIe BDF prefix).
 struct GpuNicAffinity {
-  int         gpu_ordinal = 0;
-  std::string nearest_nic;  // RdmaDevice::device name, e.g. "bnxt_re0"
+  int         gpu_ordinal = 0;      // GpuDevice::ordinal (KFD)
+  std::string nearest_nic;          // RdmaDevice::device name, e.g. "bnxt_re0"
+  bool        ambiguous = false;    // another NIC scored the same (no real nearest)
 };
 
 // One RDMA device discovered under /sys/class/infiniband/<device>.
@@ -61,6 +68,7 @@ struct RdmaDevice {
   std::string node_guid;        // .../node_guid
   int         gid_index = -1;   // selected RoCEv2 gid index (-1 = none found)
   std::string gid_type;         // .../ports/<p>/gid_attrs/types/<i> (e.g. "RoCE v2")
+  std::string port_state;       // first port's state, e.g. "ACTIVE", "DOWN" ("" = unknown)
   // Optional ibverbs enrichment (only populated under ACCEPT_HAVE_IBVERBS).
   // -1 means "not queried / unknown". ibv_query_device reports these as 32-bit.
   int         vendor_id = -1;       // ibv_device_attr.vendor_id
@@ -107,6 +115,9 @@ struct EnvironmentInfo {
   // HIP enrichment (only populated under ACCEPT_HAVE_HIP). The default
   // sysfs-only build leaves this empty.
   std::string gpu_model;       // props.gcnArchName (and/or props.name)
+  // The GPU/HCA pair this rank resolved (see common/Selection.hpp). Set by
+  // detect(); its HCA is also moved to the front of rdma_devices.
+  Selection   selection;
 
   // Flat key=value serialization (see file header). Deterministic ordering:
   // scalars first, then each rdma device in index order.

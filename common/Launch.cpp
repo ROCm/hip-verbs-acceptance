@@ -11,6 +11,8 @@
 #include <string>
 #include <system_error>
 
+#include "common/Selection.hpp"
+
 namespace acceptance {
 
 namespace {
@@ -91,6 +93,7 @@ std::vector<std::string> build_worker_args(const WorkerParams& p,
   std::vector<std::string> a = {
       "--worker",
       "--rank", std::to_string(placement.rank),
+      "--local-rank", std::to_string(placement.local_rank),
       "--size", std::to_string(size),
       "--rendezvous", rendezvous,
       "--results-out", "-",
@@ -113,7 +116,8 @@ std::vector<std::string> build_worker_args(const WorkerParams& p,
   add("--kind", p.kind);
   if (p.isolate_explicit) add("--isolate", p.isolate);
   add("--gid", p.gid);
-  add("--device", p.device);
+  add("--hca", pick_for_local_rank(p.hca, placement.local_rank));
+  add("--device", pick_for_local_rank(p.device, placement.local_rank));
   if (p.deadline_sec > 0) add("--deadline-sec", std::to_string(p.deadline_sec));
   return a;
 }

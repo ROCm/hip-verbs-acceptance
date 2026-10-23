@@ -11,6 +11,7 @@
 
 #ifdef ACCEPT_HAVE_HIP
 
+#include "common/Selection.hpp"
 #include "hip/utils/HipApi.hpp"
 #include "hip/utils/HipHelpers.hpp"
 #include "hip/utils/HipModule.hpp"

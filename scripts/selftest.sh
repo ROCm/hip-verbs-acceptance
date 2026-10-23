@@ -1263,6 +1263,68 @@ sys.exit(0 if ok else 1)' "$REP_V"; then
   fi
 fi
 
+# ===========================================================================
+# Check (w): GPU / HCA selection on the fake env (GPUs 0-3 nearest bnxt_re0,
+# GPUs 4-7 nearest bnxt_re1). -n 2 --device 0,4 gives each local rank its own
+# GPU and, by affinity, its own NIC; --hca alone picks the nearest GPU; a
+# non-nearest pair runs with a note; a NIC name in --device and a list that
+# is neither 1 nor -ppn entries long are usage errors (exit 2).
+# ===========================================================================
+REP_W="$TMP/rep_sel.json"
+LOG_W="$TMP/sel.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W" -n 2 --device 0,4 --filter 'syn2_barrier' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_W"
+RC_W1=$RC
+REP_W2="$TMP/rep_sel_hca.json"
+LOG_W2="$TMP/sel_hca.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W2" --hca bnxt_re1 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_W2"
+RC_W2=$RC
+LOG_W3="$TMP/sel_far.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W3" --hca bnxt_re1 --device 0 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$TMP/rep_sel_far.json"
+RC_W3=$RC
+run_bin "$TMP/sel_bad1.log" --device mlx5_0 --filter 'syn_pass'
+RC_W4=$RC
+run_bin "$TMP/sel_bad2.log" -n 2 --hca a,b,c --filter 'syn2_barrier'
+RC_W5=$RC
+
+if [ "$RC_W1" -ne 0 ] || [ "$RC_W2" -ne 0 ] || [ "$RC_W3" -ne 0 ]; then
+  fail "GPU/HCA selection" "exit codes $RC_W1/$RC_W2/$RC_W3 (want 0/0/0)"
+  cat "$LOG_W" "$LOG_W2" "$LOG_W3"
+elif [ "$RC_W4" -ne 2 ] || ! grep -q 'use --hca for the RDMA device' "$TMP/sel_bad1.log"; then
+  fail "GPU/HCA selection" "--device mlx5_0: exit $RC_W4 (want 2 with a --hca hint)"
+  cat "$TMP/sel_bad1.log"
+elif [ "$RC_W5" -ne 2 ] || ! grep -q -- '--hca lists 3 entries' "$TMP/sel_bad2.log"; then
+  fail "GPU/HCA selection" "-n 2 --hca a,b,c: exit $RC_W5 (want 2)"
+  cat "$TMP/sel_bad2.log"
+elif ! grep -q 'note: HCA bnxt_re1 is not the nearest NIC to GPU 0 (nearest: bnxt_re0)' "$LOG_W3"; then
+  fail "GPU/HCA selection" "--hca bnxt_re1 --device 0 printed no note"
+  cat "$LOG_W3"
+elif ! "$PY" - "$REP_W" "$REP_W2" <<'PYEOF' >"$TMP/w_out.txt" 2>&1
+import json, sys
+errs = []
+def sel(path):
+    return [n.get("selection") for n in json.load(open(path)).get("nodes", [])]
+want = [{"hca": "bnxt_re0", "gpu": 0, "hca_source": "affinity",
+         "gpu_source": "user", "local": True, "note": None},
+        {"hca": "bnxt_re1", "gpu": 4, "hca_source": "affinity",
+         "gpu_source": "user", "local": True, "note": None}]
+if sel(sys.argv[1]) != want:
+    errs.append("-n 2 --device 0,4: %r" % sel(sys.argv[1]))
+want = [{"hca": "bnxt_re1", "gpu": 4, "hca_source": "user",
+         "gpu_source": "affinity", "local": True, "note": None}]
+if sel(sys.argv[2]) != want:
+    errs.append("--hca bnxt_re1: %r" % sel(sys.argv[2]))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+PYEOF
+then
+  fail "GPU/HCA selection" "$(cat "$TMP/w_out.txt")"
+else
+  pass "GPU/HCA selection (-n 2 --device 0,4 -> bnxt_re0/bnxt_re1, --hca bnxt_re1 -> GPU 4, far pair noted, bad --device / list length exit 2)"
+fi
+
 # ---------------------------------------------------------------------------
 # Final verdict.
 # ---------------------------------------------------------------------------

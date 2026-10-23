@@ -48,7 +48,7 @@ class UdConn {
   UdConn& operator=(const UdConn&) = delete;
 
   // Open an IB device and create PD/CQ/UD-QP up to INIT (QKEY set), filling
-  // local(). dev_name empty -> ACCEPT_IB_DEVICE env var if set, else first
+  // local(). dev_name empty -> the selected HCA (ACCEPT_HCA) if set, else first
   // device with an ACTIVE port. Returns "" on success; sets no_device=true
   // when the host has no RDMA hardware (skip-worthy).
   std::string open(const std::string& dev_name, bool& no_device);

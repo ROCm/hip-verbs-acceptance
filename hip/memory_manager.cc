@@ -125,7 +125,7 @@ bool query_device_attr(int dev, hipDeviceAttribute_t attr, int* out) {
 // gpuDirectRDMACapable flag; kernel-verify the last mapping. Empty -> success.
 std::string vmm_rdma_multimap(unsigned char rdma_flag, int count) {
   const size_t bytes = sizeof(int) * 4096;
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   prop.allocFlags.gpuDirectRDMACapable = rdma_flag;
   size_t gran = 0;
   hipError_t gran_err = hipMemGetAllocationGranularity(
@@ -145,7 +145,7 @@ std::string vmm_rdma_multimap(unsigned char rdma_flag, int count) {
       return "hipMemCreate #" + std::to_string(i) + ": " +
              hipGetErrorString(create_err);
     VmmMapping mapping;
-    std::string map_err = mapping.map(handle, size, 0, /*own_handle=*/true);
+    std::string map_err = mapping.map(handle, size, gpu(), /*own_handle=*/true);
     if (!map_err.empty()) return "map #" + std::to_string(i) + ": " + map_err;
     mappings.push_back(std::move(mapping));
   }
@@ -177,7 +177,7 @@ static PosixFdImportStyle posix_fd_import_style() {
     if (hipRuntimeGetVersion(&version) == hipSuccess && version >= 70100000)
       return PosixFdImportStyle::FdAsPointer;
 
-    hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/true);
+    hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/true);
     size_t granularity = 0;
     hipMemAllocationGranularity_flags flags = hipMemAllocationGranularityMinimum;
 
@@ -235,7 +235,7 @@ void* posix_fd_os_handle(int* fd_ptr, PosixFdImportStyle style) {
 std::string map_and_verify_imported(hipMemGenericAllocationHandle_t imported,
                                     size_t size, int n, const char* label) {
   VmmMapping dst;
-  std::string map_err = dst.map(imported, size, 0, /*own_handle=*/true);
+  std::string map_err = dst.map(imported, size, gpu(), /*own_handle=*/true);
   if (!map_err.empty()) return std::string(label) + " " + map_err;
   int bad_index = -1, bad_value = -1;
   if (!hip_verify_indices(dst.as<int>(), n, &bad_index, &bad_value))
@@ -344,7 +344,7 @@ WatchdogMapResult map_on_worker_with_watchdog(
     if (status == hipSuccess) {
       hipMemAccessDesc desc{};
       desc.location.type = hipMemLocationTypeDevice;
-      desc.location.id = 0;
+      desc.location.id = gpu();
       desc.flags = hipMemAccessFlagsProtReadWrite;
       status = hipMemSetAccess(va, size, &desc, 1);
     }
@@ -395,7 +395,7 @@ hipMemPoolProps make_device_pinned_pool_props(int dev) {
 TestResult import_d2d_copy_verify(hipMemGenericAllocationHandle_t imported,
                                   size_t size, int n) {
   VmmMapping dst;
-  const std::string map_err = dst.map(imported, size, 0, /*own_handle=*/true);
+  const std::string map_err = dst.map(imported, size, gpu(), /*own_handle=*/true);
   if (!map_err.empty()) return fail("imported dst " + map_err);
 
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
@@ -605,9 +605,9 @@ std::string await_importer_token(int sock, char expected, const char* lost) {
 // request while keeping the VA reserved, like the owner.
 [[noreturn]] void run_reclaim_importer_child(int sock) {
   reclaim_set_socket_timeouts(sock);
-  const hipError_t set_device_err = hipSetDevice(0);
+  const hipError_t set_device_err = hipSetDevice(gpu());
   if (set_device_err != hipSuccess)
-    fail_as_importer(sock, std::string("hipSetDevice(0): ") +
+    fail_as_importer(sock, std::string("hipSetDevice: ") +
                                hipGetErrorString(set_device_err));
   // Force context creation so a broken child is attributable to HIP, not to the
   // handshake below.
@@ -825,10 +825,10 @@ ACCEPT_TEST(HostAlloc_Pinned, "hip/memmgr", Topology::Single, Kind::Functional,
 ACCEPT_TEST(Vmm_Granularity, "hip/memmgr", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/true);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/true);
   size_t gran = 0;
   HIP_CHECK(hipMemGetAllocationGranularity(&gran, &prop,
                                            hipMemAllocationGranularityMinimum));
@@ -849,7 +849,7 @@ ACCEPT_TEST(Vmm_Create_Map_Roundtrip, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
   const int n = kIndexCount;
@@ -865,7 +865,7 @@ ACCEPT_TEST(Vmm_Create_Map_Roundtrip, "hip/memmgr", Topology::Single,
   std::string failure;
   for (auto pass : loop) {
     VmmMapping mapping;
-    failure = mapping.map(handle, size, 0, /*own_handle=*/false);
+    failure = mapping.map(handle, size, gpu(), /*own_handle=*/false);
     if (failure.empty() && pass.first()) {
       const std::string verify_err =
           fill_indices_and_verify(mapping.as<int>(), n, nullptr);
@@ -883,7 +883,7 @@ ACCEPT_TEST(Vmm_Create_Map_Roundtrip, "hip/memmgr", Topology::Single,
 ACCEPT_TEST(Vmm_SetGetAccess, "hip/memmgr", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
   const size_t bytes = sizeof(int) * 256;
@@ -893,12 +893,12 @@ ACCEPT_TEST(Vmm_SetGetAccess, "hip/memmgr", Topology::Single, Kind::Functional,
   if (!create_err.empty()) return fail(create_err);
 
   VmmMapping mapping;
-  std::string map_err = mapping.map(handle, size, 0, /*own_handle=*/true);
+  std::string map_err = mapping.map(handle, size, gpu(), /*own_handle=*/true);
   if (!map_err.empty()) return fail(map_err);
 
   hipMemLocation loc{};
   loc.type = hipMemLocationTypeDevice;
-  loc.id = 0;
+  loc.id = gpu();
   unsigned long long flags = 0;
   // Region: the access-query latency, once (perf off) or warmup+N (perf on).
   PerfLoop loop;
@@ -924,7 +924,7 @@ ACCEPT_TEST(Vmm_SetGetAccess, "hip/memmgr", Topology::Single, Kind::Functional,
 ACCEPT_TEST(Vmm_GPUDirectRdmaVmm_Attribute, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
   // The attribute enum is always declared by the headers; whether the RUNTIME
@@ -968,7 +968,7 @@ ACCEPT_TEST(Vmm_GpuDirectRDMACapable_MultiMap, "hip/memmgr", Topology::Single,
             Kind::Functional, 60) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
   // Region: 16-way create+map cycle, once (perf off) or warmup+N (perf on).
   PerfLoop loop;
@@ -986,7 +986,7 @@ ACCEPT_TEST(Vmm_RDMA_MultiMap_NoFlag, "hip/memmgr", Topology::Single,
             Kind::Functional, 60) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
   // Region: 16-way create+map cycle, once (perf off) or warmup+N (perf on).
   PerfLoop loop;
@@ -1004,10 +1004,10 @@ ACCEPT_TEST(Vmm_RDMA_MultiMap_NoFlag, "hip/memmgr", Topology::Single,
 ACCEPT_TEST(Vmm_Negative_ZeroSize_Unaligned, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   size_t gran = 0;
   HIP_CHECK(hipMemGetAllocationGranularity(&gran, &prop,
                                            hipMemAllocationGranularityMinimum));
@@ -1037,7 +1037,7 @@ ACCEPT_TEST(Vmm_PosixFd_Export_Import, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
   const int n = kIndexCount;
@@ -1051,7 +1051,7 @@ ACCEPT_TEST(Vmm_PosixFd_Export_Import, "hip/memmgr", Topology::Single,
   // The source keeps `handle` alive (own_handle=false) so the compat sub-test can
   // re-export it; the handle is released explicitly at the end of the test.
   VmmMapping source;
-  std::string src_map_err = source.map(handle, size, 0, /*own_handle=*/false);
+  std::string src_map_err = source.map(handle, size, gpu(), /*own_handle=*/false);
   if (!src_map_err.empty()) {
     (void)hipMemRelease(handle);
     return fail("source " + src_map_err);
@@ -1103,10 +1103,10 @@ ACCEPT_TEST(Vmm_Map_NoDeadlock_KernelInFlight, "hip/memmgr", Topology::Single,
             Kind::Functional, 60) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
 
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
 
   // Fine-grained host flag the kernel polls and the host releases. Fine-grain so
   // the device sees the host store without an explicit copy.
@@ -1117,7 +1117,7 @@ ACCEPT_TEST(Vmm_Map_NoDeadlock_KernelInFlight, "hip/memmgr", Topology::Single,
   *done = 0;
 
   // A separate VMM allocation to map WHILE the kernel is in flight.
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   size_t gran = 0;
   HIP_CHECK(hipMemGetAllocationGranularity(&gran, &prop,
                                            hipMemAllocationGranularityMinimum));
@@ -1151,13 +1151,13 @@ ACCEPT_TEST(Vmm_Fabric_Export_Import, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");
 
   // The fabric handle type/enum is always declared by the headers; fabric
   // support is driver/topology dependent and detected at run time below, so an
   // unsupported runtime is a clean skip rather than a compile-time exclusion.
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   prop.requestedHandleType = hipMemHandleTypeFabric;
   size_t gran = 0;
   if (hipMemGetAllocationGranularity(&gran, &prop,
@@ -1191,7 +1191,7 @@ ACCEPT_TEST(Vmm_Fabric_Export_Import, "hip/memmgr", Topology::Single,
       break;
     }
     VmmMapping dst;
-    std::string map_err = dst.map(imported, size, 0, /*own_handle=*/true);
+    std::string map_err = dst.map(imported, size, gpu(), /*own_handle=*/true);
     verify_err = map_err.empty()
                      ? fill_indices_and_verify(dst.as<int>(), kIndexCount,
                                                nullptr)
@@ -1211,9 +1211,9 @@ ACCEPT_TEST(Vmm_Fabric_Export_Import, "hip/memmgr", Topology::Single,
 ACCEPT_TEST(Vmm_PosixFd_Import_D2D_Copy, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
 
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
@@ -1249,12 +1249,12 @@ ACCEPT_TEST(Vmm_PosixFd_Import_D2D_Copy, "hip/memmgr", Topology::Single,
 ACCEPT_TEST(Vmm_Fabric_Import_D2D_Copy, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
 
   const int n = kIndexCount;
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   prop.requestedHandleType = hipMemHandleTypeFabric;
   size_t gran = 0;
   if (hipMemGetAllocationGranularity(&gran, &prop,
@@ -1284,7 +1284,7 @@ ACCEPT_TEST(Vmm_Uncached_Type, "hip/memmgr", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");
 
   // hipMemAllocationTypeUncached is always a declared enum value; whether the
@@ -1292,7 +1292,7 @@ ACCEPT_TEST(Vmm_Uncached_Type, "hip/memmgr", Topology::Single, Kind::Functional,
   // that rejects the uncached type (hipErrorNotSupported) is a clean skip.
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   prop.type = hipMemAllocationTypeUncached;
   size_t gran = 0;
   hipError_t gran_err = hipMemGetAllocationGranularity(
@@ -1328,7 +1328,7 @@ ACCEPT_TEST(Vmm_Uncached_Type, "hip/memmgr", Topology::Single, Kind::Functional,
     }
 
     mappings.emplace_back();
-    failure = mappings.back().map(handle, size, 0, /*own_handle=*/true);
+    failure = mappings.back().map(handle, size, gpu(), /*own_handle=*/true);
     if (!failure.empty()) {
       failure = "uncached " + failure;
     } else if (pass.first()) {
@@ -1353,11 +1353,11 @@ ACCEPT_TEST(Vmm_Uncached_Type, "hip/memmgr", Topology::Single, Kind::Functional,
 ACCEPT_TEST(Vmm_Reclaim_Cycles_InProcess, "hip/memmgr", Topology::Single,
             Kind::Functional, 60) {
   (void)ctx;
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return skip("device does not advertise VMM support");  // TODO: policy gate
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
 
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/false);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/false);
   size_t gran = 0;
   HIP_CHECK(hipMemGetAllocationGranularity(&gran, &prop,
                                            hipMemAllocationGranularityMinimum));
@@ -1412,16 +1412,16 @@ ACCEPT_TEST(Vmm_Reclaim_Cycles_CrossProcess, "hip/memmgr", Topology::Single,
     return result;
   };
 
-  if (!device_has_vmm(0))
+  if (!device_has_vmm(gpu()))
     return finish(skip("device does not advertise VMM support"));
 
   // hipMemGetInfo reports the CURRENT device, so the owner's device is explicit.
-  const hipError_t set_device_err = hipSetDevice(0);
+  const hipError_t set_device_err = hipSetDevice(gpu());
   if (set_device_err != hipSuccess)
-    return finish(fail(std::string("hipSetDevice(0): ") +
+    return finish(fail(std::string("hipSetDevice: ") +
                        hipGetErrorString(set_device_err)));
 
-  hipMemAllocationProp prop = make_vmm_prop(0, /*exportable=*/true);
+  hipMemAllocationProp prop = make_vmm_prop(gpu(), /*exportable=*/true);
   size_t gran = 0;
   const hipError_t gran_err = hipMemGetAllocationGranularity(
       &gran, &prop, hipMemAllocationGranularityMinimum);
@@ -1453,7 +1453,7 @@ ACCEPT_TEST(MallocAsync_FreeAsync, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_mempool(0))
+  if (!device_has_mempool(gpu()))
     return skip("device does not advertise memory-pool support");  // TODO: policy
 
   const int n = kIndexCount;
@@ -1483,13 +1483,13 @@ ACCEPT_TEST(MemPool_Alloc, "hip/memmgr", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_mempool(0))
+  if (!device_has_mempool(gpu()))
     return skip("device does not advertise memory-pool support");  // TODO: policy
 
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
 
-  hipMemPoolProps props = make_device_pinned_pool_props(0);
+  hipMemPoolProps props = make_device_pinned_pool_props(gpu());
 
   // Create the stream before the pool so a stream-creation failure cannot leak
   // an already-created pool via HIP_CHECK's early return.
@@ -1527,13 +1527,13 @@ ACCEPT_TEST(MemPool_SetAttribute, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_mempool(0))
+  if (!device_has_mempool(gpu()))
     return skip("device does not advertise memory-pool support");  // TODO: policy
 
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
 
-  hipMemPoolProps props = make_device_pinned_pool_props(0);
+  hipMemPoolProps props = make_device_pinned_pool_props(gpu());
 
   hipMemPool_t pool = nullptr;
   HIP_CHECK(hipMemPoolCreate(&pool, &props));
@@ -1618,7 +1618,7 @@ ACCEPT_TEST(MallocManaged_Access, "hip/memmgr", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  if (!device_has_managed(0))
+  if (!device_has_managed(gpu()))
     return skip("device does not advertise managed-memory support");  // TODO: policy
 
   const int n = kIndexCount;

@@ -125,7 +125,7 @@ void run_ipc_importer_child(IpcShared* sh, int n, int wait_ms) {
     _exit(code);
   };
 
-  if (hipSetDevice(0) != hipSuccess) {
+  if (hipSetDevice(gpu()) != hipSuccess) {
     child_exit(kSetDeviceFailed);
   }
   if (!wait_flag(&sh->handle_ready, wait_ms)) {
@@ -149,8 +149,8 @@ std::string run_ipc_exporter_parent(IpcShared* sh, DeviceBuffer& buf,
                                     Stream& stream, int n, size_t bytes,
                                     int wait_ms, PerfSink& perf_sink) {
   // Phase 1: bring up device, buffer and stream.
-  if (hipSetDevice(0) != hipSuccess) {
-    return "parent hipSetDevice(0) failed";
+  if (hipSetDevice(gpu()) != hipSuccess) {
+    return "parent hipSetDevice failed";
   }
   if (buf.allocate(bytes) != hipSuccess) {
     return "parent hipMalloc failed";

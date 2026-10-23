@@ -52,6 +52,7 @@ void run_policy_tests();
 void run_resultio_tests();
 void run_ssh_tests();
 void run_launch_tests();
+void run_selection_tests();
 void run_perf_tests();
 void run_capability_tests();
 

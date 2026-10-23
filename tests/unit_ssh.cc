@@ -266,8 +266,8 @@ void test_build_remote_command_env_forwarding() {
 }
 
 void test_forward_env_pattern_matches() {
-  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_IB_DEVICE"),
-        "ACCEPT_* matches ACCEPT_IB_DEVICE");
+  CHECK(forward_env_pattern_matches("ACCEPT_*", "ACCEPT_HCA"),
+        "ACCEPT_* matches ACCEPT_HCA");
   CHECK(!forward_env_pattern_matches("ACCEPT_*", "ACCEPTX"),
         "ACCEPT_* does not match ACCEPTX (no '_' boundary)");
   CHECK(forward_env_pattern_matches("PATH", "PATH"),

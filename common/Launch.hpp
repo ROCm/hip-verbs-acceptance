@@ -62,11 +62,13 @@ struct WorkerParams {
   std::string isolate;           // --isolate value (only if isolate_explicit)
   bool        isolate_explicit = false;
   std::string gid;               // --gid index override
-  std::string device;            // --device name override
+  std::string hca;               // --hca list (1 or one per local rank)
+  std::string device;            // --device GPU list (1 or one per local rank)
   long        deadline_sec = 0;  // --deadline-sec N; 0 => omit the flag
 };
 
-// The worker argv for one rank, WITHOUT the binary (argv[0]). Results always
+// The worker argv for one rank, WITHOUT the binary (argv[0]). The rank gets
+// --local-rank and its own --hca / --device entry. Results always
 // go to stdout (--results-out -), where the launcher captures them for every
 // rank, local or remote. --policy is made absolute: a remote worker starts in
 // the ssh home directory, not the launcher's cwd.

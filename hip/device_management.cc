@@ -577,7 +577,7 @@ ACCEPT_TEST(DeviceSetLimit_StackSize, "hip/device", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
 
   hipError_t limit_err = hipDeviceSetLimit(hipLimitStackSize, 32 * 1024);
   if (limit_err == hipErrorNotSupported)
@@ -754,9 +754,9 @@ ACCEPT_TEST(Occupancy_Query, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
   hipDeviceProp_t prop{};
-  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  HIP_CHECK(hipGetDeviceProperties(&prop, gpu()));
 
   std::string kernel_err;
   hipFunction_t fn = hip_kernel_function("k_occupancy_probe", &kernel_err);
@@ -781,8 +781,8 @@ ACCEPT_TEST(Occupancy_Query, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Texture_Object_Lifecycle, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
-  if (!device_has_texture(0))
+  HIP_CHECK(hipSetDevice(gpu()));
+  if (!device_has_texture(gpu()))
     return skip("device has no texture/image hardware (CDNA3+)");
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
@@ -900,7 +900,7 @@ ACCEPT_TEST(Mem_Advise_Info, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Memcpy_Symbol, "hip/libsurface", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu()));
   const int n = 256;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
 

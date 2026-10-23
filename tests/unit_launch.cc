@@ -124,7 +124,8 @@ void test_build_worker_args() {
   wp.isolate = "all";
   wp.isolate_explicit = true;
   wp.gid = "3";
-  wp.device = "bnxt_re0";
+  wp.hca = "bnxt_re0,bnxt_re1";  // one per local rank
+  wp.device = "5";               // one for every rank
   wp.deadline_sec = 130;
 
   RankPlacement pl;
@@ -136,6 +137,7 @@ void test_build_worker_args() {
   const auto a = build_worker_args(wp, pl, 2, "127.0.0.1:4000", "synthetic");
   CHECK(!a.empty() && a[0] == "--worker", "worker args start with --worker");
   CHECK(value_of(a, "--rank") == "1", "--rank is the placement's rank");
+  CHECK(value_of(a, "--local-rank") == "1", "--local-rank is the placement's");
   CHECK(value_of(a, "--size") == "2", "--size forwarded");
   CHECK(value_of(a, "--rendezvous") == "127.0.0.1:4000", "--rendezvous forwarded");
   CHECK(value_of(a, "--results-out") == "-", "results always go to stdout");
@@ -149,15 +151,16 @@ void test_build_worker_args() {
   CHECK(value_of(a, "--kind") == "func", "--kind forwarded");
   CHECK(value_of(a, "--isolate") == "all", "--isolate forwarded when explicit");
   CHECK(value_of(a, "--gid") == "3", "--gid forwarded");
-  CHECK(value_of(a, "--device") == "bnxt_re0", "--device forwarded");
+  CHECK(value_of(a, "--hca") == "bnxt_re1", "--hca: this local rank's entry");
+  CHECK(value_of(a, "--device") == "5", "--device: a single entry is shared");
   CHECK(value_of(a, "--deadline-sec") == "130", "--deadline-sec forwarded");
   // Every flag exactly once: a second builder that also appended one (the
   // old --local-ranks / --nodes split) would show up here.
   for (const char* f : {"--worker", "--rank", "--size", "--rendezvous",
                         "--results-out", "--vendor", "--policy", "--filter",
                         "--filter-class", "--filter-category", "--hide-na",
-                        "--kind", "--isolate", "--gid", "--device",
-                        "--deadline-sec"}) {
+                        "--kind", "--isolate", "--gid", "--hca", "--device",
+                        "--local-rank", "--deadline-sec"}) {
     CHECK(count_of(a, f) == 1, (std::string("worker args hold ") + f + " once").c_str());
   }
 
@@ -168,6 +171,16 @@ void test_build_worker_args() {
   CHECK(build_worker_args(wp, remote, 2, "127.0.0.1:4000", "synthetic") == a,
         "remote and local ranks get identical worker args");
 
+  // Local rank 0 gets the first entry.
+  {
+    RankPlacement p0 = pl;
+    p0.rank = 0;
+    p0.local_rank = 0;
+    const auto b = build_worker_args(wp, p0, 2, "127.0.0.1:4000", "synthetic");
+    CHECK(value_of(b, "--hca") == "bnxt_re0", "--hca: local rank 0's entry");
+    CHECK(value_of(b, "--local-rank") == "0", "--local-rank 0");
+  }
+
   // Unset options are omitted entirely.
   {
     WorkerParams q;
@@ -175,7 +188,8 @@ void test_build_worker_args() {
     const auto b = build_worker_args(q, pl, 1, "h:1", "synthetic");
     for (const char* f : {"--policy", "--filter", "--filter-class",
                           "--filter-category", "--hide-na", "--kind",
-                          "--isolate", "--gid", "--device", "--deadline-sec"}) {
+                          "--isolate", "--gid", "--hca", "--device",
+                          "--deadline-sec"}) {
       CHECK(count_of(b, f) == 0, (std::string("unset option omitted: ") + f).c_str());
     }
   }
