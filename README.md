@@ -47,8 +47,10 @@ keeping the auto-policy lookup (`<binary_dir>/policy/...`) working out of the bo
 
 ### 3. Run the Verbs tests (two ranks / two nodes)
 
-The RDMA data-path tests need two endpoints. On one host with >=2 NICs, use two
-local ranks:
+The RDMA data-path tests need two endpoints. On one host, use two local ranks.
+Both ranks open the same NIC (`--device`, else the first one with an ACTIVE
+port) and the same GPU (HIP device 0), so this is a single-NIC loopback check,
+not a NIC-to-NIC one:
 
 ```bash
 ./build/hva --local-ranks 2 --filter-category 'verbs/*' \
@@ -146,7 +148,7 @@ not a suite defect.
 | `--policy <file>` | use a specific policy CSV directly (highest priority) |
 | `--report <file>` | where to write `report.json` (default: CWD) |
 | `--perf-csv <file>` | also write the measured metrics as CSV (needs `--kind perf\|all`) |
-| `--local-ranks 2` | spawn two local ranks and reconcile (for `verbs/*` two-node tests) |
+| `--local-ranks 2` | spawn two local ranks on one NIC and GPU (loopback) and reconcile (for `verbs/*` two-node tests) |
 | `--nodes h1,h2` | launch one worker per node and reconcile |
 | `--remote-launcher ssh\|srun` | how `--nodes` starts each worker (default `ssh`; `srun` for Slurm allocations where ssh is blocked) |
 | `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
