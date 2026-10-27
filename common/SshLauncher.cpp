@@ -62,6 +62,23 @@ bool drain_fd(int fd, std::string& sink) {
   }
 }
 
+// SIGINT/SIGTERM targets for on_launch_signal: one slot per child, holding
+// the kill() target (-pid for a local worker, which leads its own process
+// group; pid for an ssh/srun client), or 0 once the child is reaped so a
+// reused pid is never signalled. Set up by ssh_launch before its handler is
+// installed and torn down after the old handler is back.
+volatile pid_t* g_launch_targets = nullptr;
+volatile std::size_t g_launch_target_count = 0;
+
+// Async-signal-safe: kill() and _exit() only.
+void on_launch_signal(int sig) {
+  for (std::size_t i = 0; i < g_launch_target_count; ++i) {
+    const pid_t t = g_launch_targets[i];
+    if (t != 0) ::kill(t, SIGTERM);
+  }
+  ::_exit(128 + sig);
+}
+
 }  // namespace
 
 std::string shell_single_quote(const std::string& v) {
@@ -82,62 +99,40 @@ std::string shell_single_quote(const std::string& v) {
   return out;
 }
 
-std::string build_remote_command(const RemoteCommandParams& p, int rank, int size,
-                                 const std::string& remote_binary,
-                                 const std::string& rendezvous,
-                                 const std::string& vendor) {
-  // Every interpolated value is single-quoted: these are assembled into one string
-  // run by the REMOTE shell via ssh, so an unquoted path/host/vendor containing a
-  // space or shell metacharacter would break parsing or allow injection. rank and
-  // size are integers we format ourselves, so they need no quoting.
+std::string shell_quote_if_needed(const std::string& v) {
+  if (v.empty()) return "''";
+  for (const char c : v) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    if (!(std::isalnum(uc) || std::strchr("_./:=@%+,-", c) != nullptr))
+      return shell_single_quote(v);
+  }
+  return v;
+}
+
+std::string build_remote_command(
+    const std::vector<std::pair<std::string, std::string>>& env,
+    const std::string& remote_binary, const std::vector<std::string>& args) {
+  // The command is ONE string run by the REMOTE shell via ssh (or /bin/sh -c
+  // under srun), so a path/host/vendor containing a space or shell
+  // metacharacter would break parsing or allow injection if left unquoted.
   //
   // Forwarded environment: prefix the command with
-  // `env 'K1=V1' 'K2=V2' ... ` so the ssh child process (and anything it
+  // `env 'K1=V1' 'K2=V2' ... ` so the remote process (and anything it
   // execs) sees these variables, instead of whatever the remote login shell
   // sets up. Each "NAME=value" pair is single-quoted as ONE token, so a value
   // containing spaces, quotes, or even embedded newlines survives intact
   // (single quotes are the only POSIX quoting that preserves a literal
-  // newline). p.env is empty unless the caller (do_nodes) explicitly resolved
-  // --forward-env against the launcher's environment, so an empty list
-  // reproduces the command used before env forwarding byte-for-byte.
+  // newline).
   std::string cmd;
-  if (!p.env.empty()) {
+  if (!env.empty()) {
     cmd += "env";
-    for (const auto& kv : p.env) {
+    for (const auto& kv : env) {
       cmd += " " + shell_single_quote(kv.first + "=" + kv.second);
     }
     cmd += " ";
   }
   cmd += shell_single_quote(remote_binary);
-  cmd += " --worker";
-  cmd += " --rank " + std::to_string(rank);
-  cmd += " --size " + std::to_string(size);
-  cmd += " --rendezvous " + shell_single_quote(rendezvous);
-  cmd += " --results-out -";
-  cmd += " --vendor " + shell_single_quote(vendor);
-  // Policy dir: resolve to an ABSOLUTE path (the remote worker runs in the ssh
-  // home dir, not the launcher's cwd, so a relative --policy would not resolve).
-  // On a shared FS the absolute path is identical on every node (same-path
-  // assumption). Single-quote in case the path contains spaces.
-  if (!p.policy.empty()) {
-    std::error_code ec;
-    const std::string abs = std::filesystem::absolute(p.policy, ec).string();
-    cmd += " --policy " + shell_single_quote(ec ? p.policy : abs);
-  }
-  // --filter / --filter-category may carry globs — single-quote them.
-  if (!p.filter.empty())          cmd += " --filter "          + shell_single_quote(p.filter);
-  if (!p.filter_class.empty())    cmd += " --filter-class "    + shell_single_quote(p.filter_class);
-  if (!p.filter_category.empty()) cmd += " --filter-category " + shell_single_quote(p.filter_category);
-  if (p.hide_na)                  cmd += " --hide-na";
-  if (!p.kind.empty())            cmd += " --kind "            + shell_single_quote(p.kind);
-  if (p.isolate_explicit)         cmd += " --isolate "         + shell_single_quote(p.isolate);
-  if (!p.gid.empty())             cmd += " --gid "             + shell_single_quote(p.gid);
-  if (!p.device.empty())          cmd += " --device "          + shell_single_quote(p.device);
-  // Worker self-destruct deadline: armed only when > 0, so a 0 (the
-  // struct default) omits the flag — keeps the command byte-identical to
-  // before this feature existed when the caller never sets it.
-  if (p.deadline_sec > 0)
-    cmd += " --deadline-sec " + std::to_string(p.deadline_sec);
+  for (const std::string& a : args) cmd += " " + shell_quote_if_needed(a);
   return cmd;
 }
 
@@ -158,7 +153,7 @@ std::vector<std::string> split_nodes(const std::string& csv) {
 std::vector<std::string> parse_forward_env_spec(const std::string& csv) {
   // Same comma-split + trim + drop-empty rules as split_nodes, so
   // "--forward-env ''" and "--forward-env 'A,,B'" behave exactly like the
-  // equivalent --nodes spec would: zero / two entries, never an error.
+  // equivalent -hosts spec would: zero / two entries, never an error.
   return split_nodes(csv);
 }
 
@@ -292,8 +287,46 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     results[i].node = ranks[i].node;
   }
 
-  // --- spawn all ssh children ---
+  // kill() target per child: -pid for a local worker (it leads its own
+  // process group), pid for an ssh/srun client; 0 = not running. Shared with
+  // on_launch_signal and always accessed through the volatile
+  // g_launch_targets, so a write is never reordered past the handler's read.
+  std::vector<pid_t> targets(n, 0);
+  auto signal_child = [&](std::size_t i, int sig) {
+    const pid_t t = g_launch_targets[i];
+    if (t != 0) ::kill(t, sig);
+  };
+  auto mark_reaped = [&](std::size_t i, int st) {
+    children[i].reaped = true;
+    children[i].status = st;
+    g_launch_targets[i] = 0;
+  };
+
+  // Ctrl-C / SIGTERM cleanup. A local worker is in its own process group, so
+  // the terminal's SIGINT no longer reaches it; the handler forwards SIGTERM
+  // to every live child. SIGINT/SIGTERM stay blocked from before the first
+  // fork until every pid is recorded, so the handler never misses a child; a
+  // signal that arrives meanwhile is delivered when the mask is restored.
+  g_launch_targets = targets.data();
+  g_launch_target_count = n;
+  struct sigaction sa {}, old_int {}, old_term {};
+  sa.sa_handler = on_launch_signal;
+  ::sigemptyset(&sa.sa_mask);
+  ::sigaction(SIGINT, &sa, &old_int);
+  ::sigaction(SIGTERM, &sa, &old_term);
+  sigset_t cleanup_sigs, old_mask;
+  ::sigemptyset(&cleanup_sigs);
+  ::sigaddset(&cleanup_sigs, SIGINT);
+  ::sigaddset(&cleanup_sigs, SIGTERM);
+  ::sigprocmask(SIG_BLOCK, &cleanup_sigs, &old_mask);
+
+  // --- spawn all children ---
   for (size_t i = 0; i < n; ++i) {
+    const bool local = !ranks[i].local_argv.empty();
+    results[i].local = local;
+    // Built before fork(): the child only execs.
+    const std::vector<std::string> argv =
+        local ? ranks[i].local_argv : build_launch_argv(ranks[i], opts);
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
     // O_CLOEXEC so a sibling child's pipe fds don't leak into a later child
@@ -323,7 +356,16 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     }
 
     if (pid == 0) {
-      // ---- child: wire stdout/stderr to the pipes, exec ssh ----
+      // ---- child: wire stdout/stderr to the pipes, exec ----
+      // A local worker leads a new process group, so kill(-pid) reaches it
+      // (and the tests it forks) as soon as the parent records the pid; the
+      // parent also calls setpgid, whichever runs first wins.
+      if (local) ::setpgid(0, 0);
+      // Drop this launcher's handler and restore the mask the exec'd program
+      // should start with.
+      ::signal(SIGINT, SIG_DFL);
+      ::signal(SIGTERM, SIG_DFL);
+      ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
       ::dup2(out_pipe[1], STDOUT_FILENO);
       ::dup2(err_pipe[1], STDERR_FILENO);
       // Close all original pipe fds (both ends) after duping.
@@ -334,14 +376,17 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
       const int devnull = ::open("/dev/null", O_RDONLY);
       if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
 
-      const std::vector<std::string> argv = build_launch_argv(ranks[i], opts);
       std::vector<char*> cargv;
       cargv.reserve(argv.size() + 1);
-      // execvp does not modify argv, but the signature wants char* const*.
+      // exec does not modify argv, but the signature wants char* const*.
       for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
       cargv.push_back(nullptr);
-      ::execvp(argv[0].c_str(), cargv.data());
-      // exec failed — emit a diagnostic naming the selected launcher on the
+      if (local) {
+        ::execv(argv[0].c_str(), cargv.data());
+      } else {
+        ::execvp(argv[0].c_str(), cargv.data());
+      }
+      // exec failed — emit a diagnostic naming the program on the
       // (redirected) stderr and exit 127.
       const std::string msg = "hva: failed to exec " + argv[0] + "\n";
       (void)!::write(STDERR_FILENO, msg.c_str(), msg.size());
@@ -349,6 +394,8 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     }
 
     // ---- parent: keep read ends, close write ends ----
+    if (local) ::setpgid(pid, pid);
+    g_launch_targets[i] = local ? -pid : pid;
     ::close(out_pipe[1]);
     ::close(err_pipe[1]);
     set_nonblocking(out_pipe[0]);
@@ -358,6 +405,7 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     children[i].err_fd = err_pipe[0];
     results[i].launched = true;
   }
+  ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
 
   // --- bounded concurrent wait: drain pipes + reap, under one deadline ---
   const long t0_ms = monotonic_ms();
@@ -425,12 +473,10 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
       int st = 0;
       const pid_t r = waitpid_eintr(children[i].pid, &st, WNOHANG);
       if (r == children[i].pid) {
-        children[i].reaped = true;
-        children[i].status = st;
+        mark_reaped(i, st);
       } else if (r < 0) {
         // Already gone / no such child: mark reaped to avoid spinning.
-        children[i].reaped = true;
-        children[i].status = -1;
+        mark_reaped(i, -1);
       }
     }
 
@@ -444,7 +490,7 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
   if (deadline_hit) {
     for (size_t i = 0; i < n; ++i) {
       if (results[i].launched && !children[i].reaped) {
-        ::kill(children[i].pid, SIGTERM);
+        signal_child(i, SIGTERM);
         results[i].timed_out = true;
       }
     }
@@ -456,8 +502,8 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
         if (!results[i].launched || children[i].reaped) continue;
         int st = 0;
         const pid_t r = waitpid_eintr(children[i].pid, &st, WNOHANG);
-        if (r == children[i].pid) { children[i].reaped = true; children[i].status = st; }
-        else if (r < 0) { children[i].reaped = true; children[i].status = -1; }
+        if (r == children[i].pid) mark_reaped(i, st);
+        else if (r < 0) mark_reaped(i, -1);
       }
       struct timespec nap { 0, 50 * 1000 * 1000L };  // 50ms
       ::nanosleep(&nap, nullptr);
@@ -466,11 +512,10 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     // Escalate to SIGKILL and blocking-reap any survivors.
     for (size_t i = 0; i < n; ++i) {
       if (results[i].launched && !children[i].reaped) {
-        ::kill(children[i].pid, SIGKILL);
+        signal_child(i, SIGKILL);
         int st = 0;
         waitpid_eintr(children[i].pid, &st, 0);
-        children[i].reaped = true;
-        children[i].status = st;
+        mark_reaped(i, st);
       }
     }
   }
@@ -501,6 +546,11 @@ std::vector<SshChildResult> ssh_launch(const std::vector<SshRank>& ranks,
     }
   }
 
+  // Every child is reaped: hand SIGINT/SIGTERM back before the slots go away.
+  ::sigaction(SIGINT, &old_int, nullptr);
+  ::sigaction(SIGTERM, &old_term, nullptr);
+  g_launch_target_count = 0;
+  g_launch_targets = nullptr;
   return results;
 }
 

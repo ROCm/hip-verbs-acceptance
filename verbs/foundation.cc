@@ -35,6 +35,7 @@
 
 #include "common/Perf.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -56,12 +57,12 @@ struct OpenedDevice {
   }
 };
 
-// Open the device named by ACCEPT_IB_DEVICE (set from --device), else the first
+// Open the selected HCA (ACCEPT_HCA, see Topology.hpp), else the first
 // enumerable device -- the same override RcConn::open() and the environment
 // report honor, so these tests run on the device the report names. Returns
 // false on failure and fills `err`. `no_devices` is set true when the host
 // simply has no RDMA hardware (a skip-worthy condition, not a defect) vs. an
-// actual open/enumerate failure, or a --device that is not present, on a host
+// actual open/enumerate failure, or an --hca that is not present, on a host
 // that should have a NIC (a real fail).
 bool open_selected_device(OpenedDevice& d, std::string& err, bool& no_devices) {
   no_devices = false;
@@ -81,12 +82,11 @@ bool open_selected_device(OpenedDevice& d, std::string& err, bool& no_devices) {
     return false;
   }
   int idx = 0;
-  if (const char* want = std::getenv("ACCEPT_IB_DEVICE");
-      want != nullptr && *want != '\0') {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     idx = -1;
     for (int i = 0; i < num; ++i) {
       const char* name = ibv_get_device_name(d.list[i]);
-      if (name != nullptr && std::strcmp(name, want) == 0) { idx = i; break; }
+      if (name != nullptr && want == name) { idx = i; break; }
     }
     if (idx < 0) {
       err = "IB device '" + std::string(want) + "' not found";

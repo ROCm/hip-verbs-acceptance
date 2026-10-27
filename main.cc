@@ -6,7 +6,9 @@
 
 // hva — standalone HIP/Verbs acceptance harness.
 
+#include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,8 +35,8 @@
 
 #include "common/Bootstrap.hpp"
 #include "common/Capability.hpp"
+#include "common/Launch.hpp"
 #include "common/Policy.hpp"
-#include "common/PosixUtil.hpp"
 #include "common/Reporter.hpp"
 #include "common/ResultIO.hpp"
 #include "common/Runner.hpp"
@@ -63,9 +65,6 @@ namespace acceptance {
 
 namespace {
 
-// waitpid_eintr / sleep_ms / monotonic_ms live in common/PosixUtil.hpp (shared).
-using namespace posix_util;
-
 // Default --forward-env list: forwarded to ssh workers unless
 // --no-forward-env is given or --forward-env overrides it. HSA_* and
 // ACCEPT_* are prefix matches (trailing '*'); everything else is an exact
@@ -73,7 +72,7 @@ using namespace posix_util;
 constexpr const char* kDefaultForwardEnv =
     "LD_LIBRARY_PATH,ROCM_PATH,PATH,HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,"
     "HSA_*,ACCEPT_*";
-enum class Mode { None, Help, Version, List, Exec, Run, Worker, LocalRanks, Nodes };
+enum class Mode { None, Help, Version, List, Exec, Run, Worker };
 
 struct Options {
   Mode mode = Mode::None;
@@ -96,7 +95,8 @@ struct Options {
   std::string perf_csv;            // --perf-csv <file> (metrics as CSV)
   std::string vendor;              // --vendor <name> (overrides auto-detection)
   std::string gid;                 // --gid <index> (override RoCE GID index)
-  std::string device;              // --device <name> (prefer this RDMA device)
+  std::string hca;                 // --hca <name>[,<name>] (RDMA device per local rank)
+  std::string device;              // --device <n>[,<n>] (GPU HIP ordinal per local rank)
   std::string results_out;         // --results-out <path>
   bool quiet = false;              // --quiet (summary only; no per-test console lines)
   bool lint = false;               // --lint: report unlisted tests, no run
@@ -106,18 +106,23 @@ struct Options {
   int         rank = 0;             // --rank N
   int         size = 1;             // --size M
   std::string rendezvous;           // --rendezvous HOST:PORT
-  int         local_ranks = 0;      // --local-ranks N (launcher; only 2 supported)
+  int         local_rank = -1;      // --local-rank N (-1 = not given)
 
-  // --nodes launcher: ssh or srun (Phase 1b / Step 6).
-  std::string nodes;                // --nodes h1,h2 (comma list; size 1 or 2)
-  int         port = 18620;         // --port (rendezvous port on nodes[0])
+  // Launcher (mpirun-style). Ranks on this host are fork/exec'd; ranks on
+  // other hosts are started over ssh or srun.
+  int         np = 1;               // -n/-np/--np N (total ranks)
+  bool        np_explicit = false;  // true when -n was passed
+  int         ppn = 0;              // -ppn/--ppn P (0 = ceil(N / #hosts))
+  std::string hosts;                // -hosts/--hosts h0,h1 (empty = localhost)
+  bool        hosts_explicit = false;
+  int         port = 18620;         // --port (rendezvous port when a rank is remote)
   std::string ssh_user;             // --ssh-user U (ssh -l U)
   std::string remote_binary;        // --remote-binary PATH (default /proc/self/exe)
   long        launch_timeout = 120; // --launch-timeout SEC (overall deadline)
 
-  // Worker-only self-destruct deadline. Set by the launcher
-  // (do_nodes / do_local_ranks) on every worker it spawns; absent when a
-  // worker is run directly by a user. 0 = disabled (default).
+  // Worker-only self-destruct deadline. Set by the launcher (do_launch) on
+  // every worker it spawns; absent when a worker is run directly by a user.
+  // 0 = disabled (default).
   long        deadline_sec = 0;     // --deadline-sec SEC
 
   RemoteLauncher remote_launcher = RemoteLauncher::Ssh;  // --remote-launcher ssh|srun
@@ -139,18 +144,17 @@ void print_usage(std::FILE* out) {
     "Usage:\n"
     "  hva --list\n"
     "  hva --exec <id> --result-file <path>          # one test, in-process\n"
-    "  hva [--filter <glob>] [--kind func|perf|all]  # worker + report (single-node)\n"
+    "  hva [--filter <glob>] [--kind func|perf|all]  # 1 rank, in-process\n"
     "             [--filter-class <class>] [--filter-category <glob>] [--hide-na]\n"
     "             [--isolate all|none] [--policy <file>] [--vendor <name>]\n"
     "             [--report <file>] [--results-out <path>]\n"
     "  hva --lint [--policy <file>] [--vendor <name>]  # check coverage\n"
-    "  hva --local-ranks 2 [--filter ...] [--policy ...] [--vendor ...] [--report ...]\n"
-    "                                                        # spawn 2 local ranks, reconcile\n"
-    "  hva --nodes h1,h2 [--remote-launcher ssh|srun] [--port P] [--ssh-user U]\n"
-    "             [--remote-binary PATH] [--filter ...] [--policy FILE]\n"
-    "             [--vendor V] [--report R]\n"
-    "                                                        # launch 1 worker/node (ssh or\n"
-    "                                                        # srun), reconcile\n"
+    "  hva -n 2 [--filter ...] [--policy ...] [--report ...]\n"
+    "                                                        # 2 local ranks, reconcile\n"
+    "  hva -n 2 -ppn 1 -hosts h0,h1 [--remote-launcher ssh|srun] [--port P]\n"
+    "             [--ssh-user U] [--remote-binary PATH] [--filter ...] [--report R]\n"
+    "                                                        # 1 rank per host (ssh or srun\n"
+    "                                                        # for other hosts), reconcile\n"
     "  hva --worker --rank N --size M --rendezvous HOST:PORT --results-out FILE\n"
     "                                                        # one rank (spawned by launcher)\n"
     "                                                        # --results-out - writes results to\n"
@@ -178,7 +182,12 @@ void print_usage(std::FILE* out) {
     "  --vendor <name>         Override vendor auto-detection (affects auto policy\n"
     "                          file selection; lower priority than --policy)\n"
     "  --gid <index>           Force the RoCE GID index (override auto-selection)\n"
-    "  --device <name>         Prefer this RDMA device (e.g. bnxt_re0 / rdma0)\n"
+    "  --hca <name>[,...]      RDMA device to use (e.g. bnxt_re0 / rdma0): one,\n"
+    "                          or one per local rank (-ppn). Default: the GPU's\n"
+    "                          nearest ACTIVE NIC, else the first ACTIVE NIC.\n"
+    "  --device <n>[,...]      GPU (HIP ordinal) to use: one, or one per local\n"
+    "                          rank. Default: the nearest GPU to --hca if given,\n"
+    "                          else the local rank.\n"
     "  --report <file>         Where to write report.json (default: CWD)\n"
     "  --perf-csv <file>       Also write the measured metrics as CSV (needs\n"
     "                          --kind perf|all to have anything to write)\n"
@@ -186,12 +195,21 @@ void print_usage(std::FILE* out) {
     "  --lint                  Report registered tests absent from the policy;\n"
     "                          exit 1 if any found. Does not run tests.\n"
     "  --results-out <path>    Write raw per-worker results (debug)\n"
-    "  --local-ranks <n>     Spawn n local ranks (only 2 supported) and reconcile\n"
-    "  --nodes h1[,h2]       launch one worker per node (1 or 2 nodes; ssh or\n"
-    "                        srun, see --remote-launcher) and reconcile into one\n"
-    "                        report.json. Mutually exclusive with --local-ranks.\n"
-    "  --port <p>            Rendezvous port on nodes[0] (default 18620)\n"
-    "  --remote-launcher ssh|srun  How to start each node's worker (default: ssh).\n"
+    "  -n, -np, --np <n>     Total ranks: 1 (default) or 2. One local rank runs\n"
+    "                        in-process; otherwise one worker per rank is\n"
+    "                        launched and the results reconciled into one\n"
+    "                        report.json.\n"
+    "  -ppn, --ppn <p>       Ranks per host (default: ceil(n / #hosts)). Ranks\n"
+    "                        fill the hosts in block order, as with mpirun.\n"
+    "  -hosts, --hosts h0[,h1]  Hosts to place ranks on (default: localhost).\n"
+    "                        Ranks on this host are started directly; ranks on\n"
+    "                        other hosts via --remote-launcher. With more than\n"
+    "                        one host, -n is required.\n"
+    "  --port <p>            Rendezvous port on rank 0's host when a rank is\n"
+    "                        remote (default 18620; all-local runs pick a free\n"
+    "                        loopback port)\n"
+    "  --remote-launcher ssh|srun  How to start a worker on another host\n"
+    "                        (default: ssh).\n"
     "                        srun requires running inside a Slurm allocation\n"
     "                        (SLURM_JOB_ID set) and is incompatible with --ssh-user;\n"
     "                        it needs Slurm >= 20.11 for --overlap.\n"
@@ -201,7 +219,8 @@ void print_usage(std::FILE* out) {
     "                        binary's /proc/self/exe). SAME-PATH ASSUMPTION: the\n"
     "                        binary AND the --policy dir must be reachable at the\n"
     "                        SAME absolute path on every node (NFS/shared FS).\n"
-    "  --launch-timeout <s>  Overall launch deadline in seconds (default 120)\n"
+    "  --launch-timeout <s>  Overall deadline in seconds for a launched run,\n"
+    "                        local and remote ranks alike (default 120)\n"
     "  --forward-env <list>  Comma-separated env var names forwarded from the\n"
     "                        launcher to each ssh worker; a trailing '*' is a\n"
     "                        prefix match (e.g. 'ACCEPT_*'). Only variables set\n"
@@ -213,11 +232,12 @@ void print_usage(std::FILE* out) {
     "                        ssh launcher only)\n"
     "  --worker              Run one rank (spawned by the launcher)\n"
     "  --rank <n>            This worker's rank\n"
-    "  --size <n>            Total rank count (1 or 2)\n"
+    "  --local-rank <n>      This worker's rank on its host\n"
+    "  --size <n>            Total rank count\n"
     "  --rendezvous H:P      Rank-0 listener host:port for the socket bootstrap\n"
     "  --results-out PATH    Worker results file; '-' = stdout (logs -> stderr)\n"
     "  --deadline-sec <s>    Worker self-destruct deadline. Set automatically by\n"
-    "                        the launcher (--nodes / --local-ranks) to\n"
+    "                        the launcher (-n 2, or -hosts) to\n"
     "                        launch-timeout+10 so a worker whose launcher gave\n"
     "                        up (killed its ssh client / died) does not keep\n"
     "                        running. Omit when invoking --worker by hand; a\n"
@@ -334,6 +354,9 @@ int parse_args(int argc, char** argv, Options& opt) {
       }
       opt.gid = std::to_string(v);
       if (opt.mode == Mode::None) opt.mode = Mode::Run;
+    } else if (a == "--hca") {
+      if (!take_value(argc, argv, i, "--hca", opt.hca)) return 2;
+      if (opt.mode == Mode::None) opt.mode = Mode::Run;
     } else if (a == "--device") {
       if (!take_value(argc, argv, i, "--device", opt.device)) return 2;
       if (opt.mode == Mode::None) opt.mode = Mode::Run;
@@ -347,20 +370,43 @@ int parse_args(int argc, char** argv, Options& opt) {
       long v = 0;
       if (!take_int(argc, argv, i, "--rank", v)) return 2;
       opt.rank = static_cast<int>(v);
+    } else if (a == "--local-rank") {
+      long v = 0;
+      if (!take_int(argc, argv, i, "--local-rank", v)) return 2;
+      if (v < 0) {
+        std::fprintf(stderr, "error: --local-rank must be >= 0 (got %ld)\n", v);
+        return 2;
+      }
+      opt.local_rank = static_cast<int>(v);
     } else if (a == "--size") {
       long v = 0;
       if (!take_int(argc, argv, i, "--size", v)) return 2;
       opt.size = static_cast<int>(v);
     } else if (a == "--rendezvous") {
       if (!take_value(argc, argv, i, "--rendezvous", opt.rendezvous)) return 2;
-    } else if (a == "--local-ranks") {
+    } else if (a == "-n" || a == "-np" || a == "--np") {
       long v = 0;
-      if (!take_int(argc, argv, i, "--local-ranks", v)) return 2;
-      opt.local_ranks = static_cast<int>(v);
-      opt.mode = Mode::LocalRanks;
-    } else if (a == "--nodes") {
-      if (!take_value(argc, argv, i, "--nodes", opt.nodes)) return 2;
-      opt.mode = Mode::Nodes;
+      if (!take_int(argc, argv, i, a.c_str(), v)) return 2;
+      if (v < 1 || v > INT_MAX) {
+        std::fprintf(stderr, "error: %s must be at least 1 (got %ld)\n", a.c_str(), v);
+        return 2;
+      }
+      opt.np = static_cast<int>(v);
+      opt.np_explicit = true;
+      if (opt.mode == Mode::None) opt.mode = Mode::Run;
+    } else if (a == "-ppn" || a == "--ppn") {
+      long v = 0;
+      if (!take_int(argc, argv, i, a.c_str(), v)) return 2;
+      if (v < 1) {
+        std::fprintf(stderr, "error: %s must be >= 1 (got %ld)\n", a.c_str(), v);
+        return 2;
+      }
+      opt.ppn = static_cast<int>(std::min(v, 1000L));
+      if (opt.mode == Mode::None) opt.mode = Mode::Run;
+    } else if (a == "-hosts" || a == "--hosts") {
+      if (!take_value(argc, argv, i, a.c_str(), opt.hosts)) return 2;
+      opt.hosts_explicit = true;
+      if (opt.mode == Mode::None) opt.mode = Mode::Run;
     } else if (a == "--port") {
       long v = 0;
       if (!take_int(argc, argv, i, "--port", v)) return 2;
@@ -404,11 +450,24 @@ int parse_args(int argc, char** argv, Options& opt) {
     }
   }
 
-  // --nodes (ssh/srun launcher) and --local-ranks (localhost launcher) are mutually
-  // exclusive: they are two different launch backends for the same merge path.
-  if (!opt.nodes.empty() && opt.local_ranks != 0) {
-    std::fprintf(stderr,
-                 "error: --nodes and --local-ranks are mutually exclusive\n");
+  // -n / -ppn / -hosts.
+  if (opt.hosts_explicit && split_nodes(opt.hosts).empty()) {
+    std::fprintf(stderr, "error: -hosts is empty\n");
+    return 2;
+  }
+  if (const std::string err = validate_launch(opt.np, opt.np_explicit, opt.ppn,
+                                              split_nodes(opt.hosts));
+      !err.empty()) {
+    std::fprintf(stderr, "error: %s\n", err.c_str());
+    return 2;
+  }
+  // A worker gets its own entries already picked.
+  if (const std::string err = topology::validate_lists(
+          opt.hca, opt.device,
+          opt.worker ? 1
+                     : effective_ppn(opt.np, opt.ppn, split_nodes(opt.hosts).size()));
+      !err.empty()) {
+    std::fprintf(stderr, "error: %s\n", err.c_str());
     return 2;
   }
 
@@ -464,6 +523,67 @@ int parse_args(int argc, char** argv, Options& opt) {
   return 0;
 }
 
+// hipSetDevice(g) when the HIP runtime is there. Returns why it failed, or ""
+// on success and when there is no GPU at all (no HIP runtime or no device):
+// verbs-only runs need none, and the HIP tests report that themselves.
+std::string set_current_gpu(int g) {
+#ifdef ACCEPT_HAVE_HIP
+  if (!hipw::init_result().hip_lib_loaded) return "";
+  try {
+    const hipError_t e = hipSetDevice(g);
+    if (e == hipSuccess) return "";
+    int n = 0;
+    if (hipGetDeviceCount(&n) != hipSuccess || n == 0) return "";
+    return "hipSetDevice(" + std::to_string(g) + ") failed: " + hipGetErrorString(e) +
+           " (" + std::to_string(n) + " GPU(s) visible)";
+  } catch (const hipw::MissingSymbol&) {
+    return "";
+  }
+#else
+  (void)g;
+  return "";
+#endif
+}
+
+// Make the rank's GPU current before a test body: the previous in-process
+// test may have left another GPU current. Tests that fork before their first
+// HIP call select it themselves: a child inheriting an initialized HIP runtime
+// cannot use it.
+std::string prepare_test(const TestMeta& meta) {
+  if (meta.category == "hip/ipc" || meta.id == "Vmm_Reclaim_Cycles_CrossProcess")
+    return "";
+  return set_current_gpu(topology::get_rank_gpu());
+}
+
+// Resolve this rank's GPU and HCA (detect()), say why if a fallback was
+// taken, make the GPU current, and publish the pair for
+// topology::get_rank_hca() / get_rank_gpu() and the --exec children. Only for processes that run tests: a launcher's resolved
+// pair would leak into its workers' inherited / forwarded environment. The
+// header goes to stderr: a worker's stdout carries its results. The launcher
+// only shows a worker's stderr on failure and prints the pair itself. False
+// (after an error line) when an explicit --hca / --device is not on this host
+// or the GPU can't be made current.
+bool apply_topology(const Options& opt, bool worker) {
+  const topology::Pair& pair = environment().rank_pair;
+  if (!opt.quiet) {
+    const std::string who = worker ? "rank " + std::to_string(opt.rank) + ": " : "";
+    std::fprintf(stderr, "topology: %s%s\n", who.c_str(),
+                 topology::format_pair(pair).c_str());
+  }
+  if (!pair.note.empty()) std::fprintf(stderr, "note: %s\n", pair.note.c_str());
+  if (!pair.error.empty()) {
+    std::fprintf(stderr, "error: %s\n", pair.error.c_str());
+    return false;
+  }
+  if (!pair.hca.empty()) ::setenv("ACCEPT_HCA", pair.hca.c_str(), 1);
+  ::setenv("ACCEPT_DEVICE", std::to_string(pair.gpu).c_str(), 1);
+  if (const std::string err = set_current_gpu(pair.gpu); !err.empty()) {
+    std::fprintf(stderr, "error: GPU %d: %s\n", pair.gpu, err.c_str());
+    return false;
+  }
+  return true;
+}
+
 // --list: one line per registered test with its metadata.
 int do_list() {
   for (const auto& m : TestRegistry::all()) {
@@ -484,6 +604,8 @@ int do_exec(const Options& opt) {
     return 2;
   }
 
+  const std::string prep_err = prepare_test(*meta);
+
   LoopbackBootstrap boot;
   TestContext ctx;
   ctx.rank = boot.rank();
@@ -494,6 +616,8 @@ int do_exec(const Options& opt) {
   TestResult result;
   if (acceptance::hipw::hip_category_unavailable(meta->category)) {
     result = skip("HIP runtime unavailable (libamdhip64.so not loaded)");
+  } else if (!prep_err.empty()) {
+    result = fail(prep_err);
   } else {
     result = acceptance::run_with_probe([&] {
       try {
@@ -564,6 +688,16 @@ size_t eligible_count(bool exclude_two_node) {
   return n;
 }
 
+// The two-rank tests run only with exactly 2 ranks; any other size leaves them
+// out of the run and the report. Say so, so a 1- or 8-rank run that selected
+// some does not look complete.
+void note_two_rank_tests(const Options& opt, int size) {
+  if (size == 2 || opt.quiet) return;
+  const size_t n = select_tests(opt, false).size() - select_tests(opt, true).size();
+  if (n > 0)
+    std::fprintf(stderr, "note: %zu two-rank test(s) not run: they need -n 2\n", n);
+}
+
 constexpr const char* kDefaultReportPath = "./report.json";
 
 // Directory containing the running binary (from /proc/self/exe readlink).
@@ -594,11 +728,14 @@ std::string gpu_platform_key(const std::string& gpu_model) {
 //  2. --vendor <name>  — selects <binary_dir>/policy/<name>.csv
 //  3. auto-detected platform -> prefer <binary_dir>/policy/<gpu>_<nic>.csv
 //     (e.g. mi350_thor.csv), else fall back to <nic>.csv, else discovery.
+//     With GPUs but no known NIC: <gpu>.csv (e.g. mi350.csv; gpu.csv for an
+//     unmapped arch), else discovery. With neither: synthetic.csv.
 std::string resolve_vendor(const Options& opt) {
   if (!opt.vendor.empty()) return opt.vendor;
-  const std::string& v = environment().vendor;
+  const EnvironmentInfo& env = environment();
+  const std::string& v = env.vendor;
+  const std::string gpu = gpu_platform_key(env.gpu_model);
   if (v == "connectx" || v == "thor" || v == "ionic") {
-    const std::string gpu = gpu_platform_key(environment().gpu_model);
     if (!gpu.empty()) {
       const std::string combined = gpu + "_" + v;  // e.g. "mi350_ionic"
       std::ifstream probe(binary_dir() + "/policy/" + combined + ".csv");
@@ -606,6 +743,9 @@ std::string resolve_vendor(const Options& opt) {
     }
     return v;  // fall back to the bare NIC policy (or discovery if absent)
   }
+  // A GPU-only host must not land on synthetic.csv: it lists no real test,
+  // so every HIP test would be silently excluded.
+  if (env.gpu_count > 0 || !env.gpu_devices.empty()) return gpu.empty() ? "gpu" : gpu;
   return "synthetic";
 }
 
@@ -647,6 +787,10 @@ std::vector<TestMeta> fill_report_selection(const Options& opt,
   in.discovery = discovery;
   in.quiet = opt.quiet;
   in.perf_csv = opt.perf_csv;
+  const std::vector<std::string> hosts = split_nodes(opt.hosts);
+  in.launch.np = opt.np;
+  in.launch.ppn = effective_ppn(opt.np, opt.ppn, hosts.size());
+  in.launch.hosts = hosts.empty() ? std::vector<std::string>{"localhost"} : hosts;
   std::vector<TestMeta> selected = select_tests(opt, exclude_two_node);
   for (const auto& m : selected) in.selected_ids.insert(m.id);
   in.class_filter = opt.filter_class;
@@ -746,12 +890,14 @@ int do_run(const Options& opt) {
   const std::vector<TestMeta> selected =
       fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/true, in);
   const Partition part = classify_and_partition(selected, policy, opt, environment());
+  note_two_rank_tests(opt, 1);
 
   RunnerOptions ropts;
   ropts.isolate = opt.isolate;
   // Live per-test streaming to stderr (suppressed by --quiet); NA tests were
   // streamed at skip time, so the live stream covers every selected test.
   ropts.stream = !opt.quiet;
+  ropts.prepare = prepare_test;
   ropts.discovery = discovery;
   ropts.classifications = part.classifications;
   for (const auto& s : part.skipped_lines)
@@ -816,7 +962,7 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
 //
 // setpgid(0,0) makes this worker the leader of a FRESH process group,
 // distinct from whatever group it inherited (the launcher's, or a
-// --local-ranks parent's terminal foreground group). That lets the watchdog
+// a local launcher's terminal foreground group). That lets the watchdog
 // reach this worker with a single kill(-getpgrp()) without also hitting the
 // launcher or sibling workers. A currently-running isolated --exec test
 // child is in ITS OWN group (Runner::run_isolated() has it call
@@ -834,8 +980,8 @@ bool parse_rendezvous(const std::string& s, std::string& host, int& port) {
 // locks). A thread has none of those constraints, so the deadline check and
 // the diagnostic print are ordinary code.
 //
-// SIGTERM/SIGINT for a launcher-spawned worker (the --local-ranks launcher
-// sends SIGTERM on Ctrl-C): kill the active isolated test's group, then this
+// SIGTERM/SIGINT for a launcher-spawned worker (the launcher sends SIGTERM on
+// Ctrl-C): kill the active isolated test's group, then this
 // worker's. Only async-signal-safe calls.
 void on_worker_signal(int) {
   kill_active_isolated_test(SIGKILL);
@@ -896,31 +1042,30 @@ int do_worker(const Options& opt) {
     std::fprintf(stderr, "error: --worker requires --results-out\n");
     return 2;
   }
-  if (opt.size < 1 || opt.size > 2) {
-    std::fprintf(stderr, "error: --worker supports size 1 or 2 (got %d)\n",
-                 opt.size);
+  if (opt.size < 1) {
+    std::fprintf(stderr, "error: --worker needs --size >= 1 (got %d)\n", opt.size);
     return 2;
   }
+  if (!apply_topology(opt, /*worker=*/true)) return 2;
 
-  // Construct bootstrap; failure is a hard error (exit 4).
+  // Only a 2-rank run connects its ranks: the two-rank tests are the only ones
+  // with a peer, and they run only then. Failure is a hard error (exit 4).
   std::unique_ptr<Bootstrap> boot;
-  try {
-    if (opt.size == 1) {
-      boot = std::make_unique<LoopbackBootstrap>();
-    } else {
-      std::string host;
-      int port = 0;
-      if (!parse_rendezvous(opt.rendezvous, host, port)) {
-        std::fprintf(stderr, "error: bad --rendezvous '%s' (want HOST:PORT)\n",
-                     opt.rendezvous.c_str());
-        return 2;
-      }
-      boot = std::make_unique<SocketBootstrap>(opt.rank, opt.size, host, port);
+  if (opt.size == 2) {
+    std::string host;
+    int port = 0;
+    if (!parse_rendezvous(opt.rendezvous, host, port)) {
+      std::fprintf(stderr, "error: bad --rendezvous '%s' (want HOST:PORT)\n",
+                   opt.rendezvous.c_str());
+      return 2;
     }
-  } catch (const std::exception& ex) {
-    std::fprintf(stderr, "error: bootstrap failed (rank %d): %s\n", opt.rank,
-                 ex.what());
-    return 4;  // 4 = bootstrap failure (hard error)
+    try {
+      boot = std::make_unique<SocketBootstrap>(opt.rank, opt.size, host, port);
+    } catch (const std::exception& ex) {
+      std::fprintf(stderr, "error: bootstrap failed (rank %d): %s\n", opt.rank,
+                   ex.what());
+      return 4;  // 4 = bootstrap failure (hard error)
+    }
   }
 
   const std::string vendor = resolve_vendor(opt);
@@ -932,25 +1077,25 @@ int do_worker(const Options& opt) {
   const bool discovery = !policy.present;
 
   const std::vector<TestMeta> selected =
-      select_tests(opt, /*exclude_two_node=*/opt.size == 1);
+      select_tests(opt, /*exclude_two_node=*/opt.size != 2);
   const Partition part = classify_and_partition(selected, policy, opt, environment());
 
   RunnerOptions ropts;
   ropts.isolate = opt.isolate;
   ropts.stream = !opt.quiet;
+  ropts.prepare = prepare_test;
   ropts.discovery = discovery;
   ropts.classifications = part.classifications;
   for (const auto& s : part.skipped_lines)
     ropts.skipped_lines.push_back({s.category, s.line});
-  ropts.boot = boot.get();   // shared bootstrap for in-process (TwoNode) tests
+  ropts.boot = boot.get();   // TwoNode tests' peer link; null => per-test loopback
   ropts.rank = opt.rank;
   ropts.size = opt.size;
   Runner runner(ropts);
   const std::vector<TestResult> results = runner.run(part.to_run);
 
-  // --results-out - writes rank block to stdout (the --nodes launcher, ssh or
-  // srun, captures it). Each
-  // worker emits its DETECTED environment as an @env block so the launcher can
+  // --results-out - writes rank block to stdout (the launcher captures it for
+  // every rank, local or remote). Each worker emits its DETECTED environment as an @env block so the launcher can
   // build per-node descriptors from the workers' streams.
   const std::string text =
       result_io::serialize(opt.rank, results, environment());
@@ -1011,250 +1156,6 @@ bool load_rank_results_text(const std::string& text, ReportInputs& in,
   return true;
 }
 
-bool load_rank_results(const std::string& path, ReportInputs& in) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return false;
-  std::stringstream buf;
-  buf << f.rdbuf();
-  return load_rank_results_text(buf.str(), in, /*force_rank=*/-1);
-}
-
-// SIGINT/SIGTERM cleanup for --local-ranks. Workers now always get
-// --deadline-sec, which makes them call setpgid(0,0) at startup (see
-// arm_worker_deadline) and leave this launcher's terminal foreground process
-// group. Without this handler, Ctrl-C (or `kill` on the launcher) would no
-// longer reach pid0/pid1 -- previously the kernel delivered the terminal's
-// SIGINT to the whole foreground group, workers included, for free. The
-// handler itself must be async-signal-safe: kill() and _exit() are the only
-// calls it makes. do_local_ranks blocks SIGINT/SIGTERM from before the forks
-// until both pids are published and each worker leads its group, so the
-// handler never sees a forked but unrecorded worker. A pid is cleared once
-// reaped, so a reused pid is never signalled.
-volatile pid_t g_local_rank_pid0 = 0;
-volatile pid_t g_local_rank_pid1 = 0;
-
-void on_local_ranks_signal(int sig) {
-  // Negative pid == "the process group led by this pid". Each worker leads
-  // its own group (setpgid(0,0) in arm_worker_deadline). SIGTERM, not
-  // SIGKILL: the worker's on_worker_signal then kills its active isolated
-  // test's group (which this group does not include) before its own. A
-  // worker that has not installed that handler yet has no isolated test, and
-  // the default SIGTERM action ends it.
-  const pid_t p0 = g_local_rank_pid0;
-  const pid_t p1 = g_local_rank_pid1;
-  if (p0 > 0) ::kill(-p0, SIGTERM);
-  if (p1 > 0) ::kill(-p1, SIGTERM);
-  ::_exit(128 + sig);
-}
-
-int do_local_ranks(const Options& opt) {
-  // Installed before any worker is forked so there is no window where a
-  // Ctrl-C/SIGTERM would fall back to the default (no-cleanup) action.
-  {
-    struct sigaction sa {};
-    sa.sa_handler = on_local_ranks_signal;
-    ::sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    ::sigaction(SIGINT, &sa, nullptr);
-    ::sigaction(SIGTERM, &sa, nullptr);
-  }
-
-  if (opt.local_ranks != 2) {
-    std::fprintf(stderr,
-                 "error: --local-ranks supports exactly 2 (got %d)\n",
-                 opt.local_ranks);
-    return 2;
-  }
-
-  const int port = pick_free_port();
-  if (port == 0) {
-    std::fprintf(stderr, "error: could not find a free rendezvous port\n");
-    return 3;
-  }
-  const std::string rendezvous = "127.0.0.1:" + std::to_string(port);
-
-  // Per-run temp dir for the two per-rank result files.
-  char tmpl[] = "/tmp/hva_ranks_XXXXXX";
-  const char* dir = ::mkdtemp(tmpl);
-  if (dir == nullptr) {
-    std::fprintf(stderr, "error: mkdtemp failed: %s\n", std::strerror(errno));
-    return 3;
-  }
-  const std::string tmpdir = dir;
-  const std::string r0_path = tmpdir + "/r0.kv";
-  const std::string r1_path = tmpdir + "/r1.kv";
-
-  auto cleanup = [&]() {
-    ::unlink(r0_path.c_str());
-    ::unlink(r1_path.c_str());
-    ::rmdir(tmpdir.c_str());
-  };
-
-  // Hold SIGINT/SIGTERM from the forks until the pids are published; one that
-  // arrives meanwhile is handled when the mask is restored below.
-  sigset_t cleanup_sigs, old_mask;
-  ::sigemptyset(&cleanup_sigs);
-  ::sigaddset(&cleanup_sigs, SIGINT);
-  ::sigaddset(&cleanup_sigs, SIGTERM);
-  ::sigprocmask(SIG_BLOCK, &cleanup_sigs, &old_mask);
-
-  // Spawn a worker for `rank` with its results path.
-  auto spawn = [&](int rank, const std::string& rpath) -> pid_t {
-    const pid_t pid = ::fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-      // Lead a new process group before exec, so kill(-pid) reaches this
-      // worker as soon as its pid is published (the parent also calls
-      // setpgid; whichever runs first wins). Then drop this launcher's
-      // handlers and restore the signal mask the worker should start with.
-      ::setpgid(0, 0);
-      ::signal(SIGINT, SIG_DFL);
-      ::signal(SIGTERM, SIG_DFL);
-      ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
-      // ---- child: execv self in --worker mode ----
-      std::vector<std::string> args = {
-        "/proc/self/exe", "--worker",
-        "--rank", std::to_string(rank),
-        "--size", "2",
-        "--rendezvous", rendezvous,
-        "--results-out", rpath,
-        // Launcher reconciles; silence worker live streaming.
-        "--quiet",
-        // Bound the worker's own lifetime so it self-destructs if this
-        // launcher dies before it gets a chance to kill it (see
-        // on_local_ranks_signal for the SIGINT/SIGTERM path, and the
-        // deadline-exceeded path below for the "launcher hung" path).
-        "--deadline-sec", std::to_string(opt.launch_timeout + 10),
-      };
-      if (!opt.filter.empty())  { args.push_back("--filter");  args.push_back(opt.filter); }
-      if (!opt.kind.empty())    { args.push_back("--kind");    args.push_back(opt.kind); }
-      if (!opt.vendor.empty())  { args.push_back("--vendor");  args.push_back(opt.vendor); }
-      if (!opt.policy.empty())  { args.push_back("--policy");  args.push_back(opt.policy); }
-      if (opt.isolate_explicit) { args.push_back("--isolate"); args.push_back(opt.isolate); }
-      // Forwarded for parity with --nodes' RemoteCommandParams (do_nodes). For
-      // --gid/--device this is belt-and-suspenders: the launcher already
-      // setenv()s ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE before spawning (see
-      // run()), and execv() below inherits that environment, so those two were
-      // already effectively forwarded; passing them as flags too keeps the
-      // --local-ranks and --nodes code paths visibly symmetric and doesn't
-      // change behavior (same value either way).
-      if (!opt.filter_class.empty())    { args.push_back("--filter-class");    args.push_back(opt.filter_class); }
-      if (!opt.filter_category.empty()) { args.push_back("--filter-category"); args.push_back(opt.filter_category); }
-      if (opt.hide_na)                  { args.push_back("--hide-na"); }
-      if (!opt.gid.empty())             { args.push_back("--gid");    args.push_back(opt.gid); }
-      if (!opt.device.empty())          { args.push_back("--device"); args.push_back(opt.device); }
-      std::vector<char*> cargv;
-      cargv.reserve(args.size() + 1);
-      for (auto& a : args) cargv.push_back(a.data());
-      cargv.push_back(nullptr);
-      char self[] = "/proc/self/exe";
-      ::execv(self, cargv.data());
-      ::_exit(127);  // exec failed
-    }
-    ::setpgid(pid, pid);
-    return pid;
-  };
-
-  const pid_t pid0 = spawn(0, r0_path);
-  const pid_t pid1 = spawn(1, r1_path);
-  // Publish pids for on_local_ranks_signal, then take pending signals.
-  g_local_rank_pid0 = pid0;
-  g_local_rank_pid1 = pid1;
-  ::sigprocmask(SIG_SETMASK, &old_mask, nullptr);
-  if (pid0 < 0 || pid1 < 0) {
-    std::fprintf(stderr, "error: fork failed launching workers\n");
-    if (pid0 > 0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, nullptr, 0); }
-    if (pid1 > 0) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, nullptr, 0); }
-    g_local_rank_pid0 = 0;
-    g_local_rank_pid1 = 0;
-    cleanup();
-    return 3;
-  }
-  // Overall-wait guard: poll for both children, bounded by a generous deadline
-  // (rendezvous timeout is ~30s per side; give headroom). On timeout, SIGKILL
-  // both and error out — NOTHING hangs forever.
-  const long overall_sec = 90;
-  const long t0_ms = monotonic_ms();
-
-  int st0 = 0, st1 = 0;
-  bool done0 = false, done1 = false;
-  bool timed_out = false;
-  while (!(done0 && done1)) {
-    if (!done0) {
-      const pid_t r = waitpid_eintr(pid0, &st0, WNOHANG);
-      if (r == pid0) done0 = true;
-      else if (r < 0) { done0 = true; st0 = -1; }
-      if (done0) g_local_rank_pid0 = 0;
-    }
-    if (!done1) {
-      const pid_t r = waitpid_eintr(pid1, &st1, WNOHANG);
-      if (r == pid1) done1 = true;
-      else if (r < 0) { done1 = true; st1 = -1; }
-      if (done1) g_local_rank_pid1 = 0;
-    }
-    if (done0 && done1) break;
-    if ((monotonic_ms() - t0_ms) / 1000 >= overall_sec) {
-      timed_out = true;
-      break;
-    }
-    sleep_ms(20);
-  }
-
-  if (timed_out) {
-    std::fprintf(stderr,
-                 "error: workers did not complete within %lds — killing "
-                 "(possible rendezvous hang)\n", overall_sec);
-    if (!done0) { ::kill(pid0, SIGKILL); waitpid_eintr(pid0, &st0, 0); }
-    if (!done1) { ::kill(pid1, SIGKILL); waitpid_eintr(pid1, &st1, 0); }
-    g_local_rank_pid0 = 0;
-    g_local_rank_pid1 = 0;
-    cleanup();
-    return 4;  // bootstrap/launch failure
-  }
-
-  // Each worker must have exited 0 with a parseable results file. A nonzero exit
-  // or signal -> bootstrap/launch failure (hard error, distinct from a test
-  // failing).
-  auto exit_ok = [](int st) {
-    return WIFEXITED(st) && WEXITSTATUS(st) == 0;
-  };
-  if (!exit_ok(st0) || !exit_ok(st1)) {
-    std::fprintf(stderr,
-                 "error: a worker exited abnormally (rank0 status=%d, "
-                 "rank1 status=%d) — bootstrap/run failure\n", st0, st1);
-    cleanup();
-    return 4;
-  }
-
-  // Reconcile: load both per-rank files into one ReportInputs.
-  const std::string vendor = resolve_vendor(opt);
-  Policy policy;
-  int rc = 0;
-  if (!load_policy_or_fail(opt, vendor, policy, rc)) { cleanup(); return rc; }
-  const bool discovery = !policy.present;
-
-  // 2-rank run keeps TwoNode tests; the denominator is the full registry.
-  ReportInputs in;
-  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/false, in);
-  // Placeholder envs: load_rank_results() parses each worker's @env block (the
-  // 3-arg result_io::parse) and overwrites the matching node's environment by
-  // rank, so these EnvironmentInfo{} are replaced with the detected descriptors.
-  in.nodes.push_back({0, "localhost", EnvironmentInfo{}});
-  in.nodes.push_back({1, "localhost", EnvironmentInfo{}});
-
-  if (!load_rank_results(r0_path, in) || !load_rank_results(r1_path, in)) {
-    std::fprintf(stderr,
-                 "error: a worker results file is missing or unparseable — "
-                 "bootstrap/run failure\n");
-    cleanup();
-    return 4;
-  }
-
-  const int gate_rc = finalize_report(opt, policy, in);
-  cleanup();
-  return gate_rc;
-}
-
 // Tail of a captured stderr blob, for diagnostics (last ~2KB).
 std::string stderr_tail(const std::string& s) {
   constexpr size_t kMax = 2048;
@@ -1282,32 +1183,83 @@ const char* launcher_name(RemoteLauncher l) {
   return l == RemoteLauncher::Srun ? "srun" : "ssh";
 }
 
-// NODES launcher: ssh or srun one worker per node; same absolute binary+policy
-// path required.
-int do_nodes(const Options& opt) {
-  const std::vector<std::string> nodes = split_nodes(opt.nodes);
-  if (nodes.empty()) {
-    std::fprintf(stderr, "error: --nodes is empty\n");
-    return 2;
-  }
-  if (nodes.size() > 2) {
-    std::fprintf(stderr,
-                 "error: --nodes supports 1 or 2 nodes (got %zu); size>2 is not "
-                 "supported (SocketBootstrap is scoped to size<=2)\n",
-                 nodes.size());
-    return 2;
-  }
-  if (opt.port <= 0 || opt.port > 65535) {
-    std::fprintf(stderr, "error: bad --port %d\n", opt.port);
-    return 2;
+// This host's name, used to tell local ranks from remote ones. "" when
+// gethostname() fails: then only localhost/127.0.0.1 and this host's
+// addresses count as local.
+std::string self_hostname() {
+  char buf[256] = {};
+  if (::gethostname(buf, sizeof(buf) - 1) != 0) return "";
+  return buf;
+}
+
+// plan_ranks(), with a host given as one of this machine's addresses or
+// aliases also counted as local (no ssh / srun back to ourselves).
+std::vector<RankPlacement> plan_job(const Options& opt, const std::string& self) {
+  std::vector<RankPlacement> plan =
+      plan_ranks(opt.np, opt.ppn, split_nodes(opt.hosts), self);
+  mark_local_addresses(plan);
+  return plan;
+}
+
+// True when -n / -ppn / -hosts need the launcher: more than one rank, or a
+// rank on another host. A single local rank runs in-process (do_run).
+bool needs_launch(const Options& opt) {
+  if (opt.np > 1) return true;
+  for (const RankPlacement& p : plan_job(opt, self_hostname()))
+    if (!p.is_local) return true;
+  return false;
+}
+
+// Launcher for -n / -ppn / -hosts: one worker per rank, under one
+// --launch-timeout deadline. Ranks on this host are fork/exec'd directly;
+// ranks on other hosts are started over ssh or srun (same absolute binary and
+// policy path required). Every worker writes its results to stdout, and the
+// blocks are reconciled into one report.json.
+int do_launch(const Options& opt) {
+  const std::vector<std::string> hosts = split_nodes(opt.hosts);
+  const std::string self = self_hostname();
+  const std::vector<RankPlacement> plan = plan_job(opt, self);
+  const int size = opt.np;
+  const bool all_local =
+      std::all_of(plan.begin(), plan.end(),
+                  [](const RankPlacement& p) { return p.is_local; });
+
+  // Rendezvous (used by 2-rank runs only): rank 0 listens (binds 0.0.0.0) and
+  // the other rank dials it. All local: loopback on a free port. Otherwise
+  // rank 0's host on --port; a remote rank can't dial "localhost", so name this
+  // machine instead.
+  std::string rendezvous;
+  if (all_local) {
+    const int port = pick_free_port();
+    if (port == 0) {
+      std::fprintf(stderr, "error: could not find a free rendezvous port\n");
+      return 3;
+    }
+    rendezvous = "127.0.0.1:" + std::to_string(port);
+  } else {
+    if (opt.port <= 0 || opt.port > 65535) {
+      std::fprintf(stderr, "error: bad --port %d\n", opt.port);
+      return 2;
+    }
+    std::string host0 = plan[0].host;
+    if (host0 == "localhost" || host0 == "127.0.0.1") {
+      if (self.empty()) {
+        std::fprintf(stderr,
+                     "error: rank 0 is on this host but gethostname() failed; "
+                     "name this host in -hosts\n");
+        return 2;
+      }
+      host0 = self;
+    }
+    rendezvous = host0 + ":" + std::to_string(opt.port);
   }
 
-  const int size = static_cast<int>(nodes.size());
   const std::string vendor = resolve_vendor(opt);
 
   // Remote binary: default to our own absolute path (same-path/NFS assumption).
+  // Local ranks always exec /proc/self/exe.
   std::string remote_binary = opt.remote_binary;
-  if (remote_binary.empty()) {
+  if (!all_local && remote_binary.empty()) {
     char buf[4096];
     const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
     if (n <= 0) {
@@ -1320,47 +1272,52 @@ int do_nodes(const Options& opt) {
     remote_binary = buf;
   }
 
-  // Rendezvous = nodes[0]:port. rank0 (nodes[0]) is the listener (binds
-  // 0.0.0.0); rank1 (nodes[1]) dials nodes[0]:port.
-  const std::string rendezvous =
-      nodes[0] + ":" + std::to_string(opt.port);
+  WorkerParams wp;
+  wp.policy           = opt.policy;
+  wp.filter           = opt.filter;
+  wp.filter_class     = opt.filter_class;
+  wp.filter_category  = opt.filter_category;
+  wp.hide_na          = opt.hide_na;
+  wp.kind             = opt.kind;
+  wp.isolate          = opt.isolate;
+  wp.isolate_explicit = opt.isolate_explicit;
+  wp.gid              = opt.gid;
+  wp.hca              = opt.hca;
+  wp.device           = opt.device;
+  // Bound every worker to the SAME deadline this launcher uses for its own
+  // wait (launch_timeout), plus headroom so the launcher's own timeout/kill
+  // always fires first in the common case; the worker watchdog is the
+  // backstop for when it doesn't (launcher killed / host died before it could
+  // even try).
+  wp.deadline_sec     = opt.launch_timeout + 10;
 
-  // Build the per-rank launch specs (ssh or srun argv is built from these).
-  RemoteCommandParams rcp;
-  rcp.policy          = opt.policy;
-  rcp.filter          = opt.filter;
-  rcp.filter_class    = opt.filter_class;
-  rcp.filter_category = opt.filter_category;
-  rcp.hide_na         = opt.hide_na;
-  rcp.kind            = opt.kind;
-  rcp.isolate         = opt.isolate;
-  rcp.isolate_explicit = opt.isolate_explicit;
-  rcp.gid             = opt.gid;
-  rcp.device          = opt.device;
-  // Bound the remote worker to the SAME deadline this launcher already
-  // uses for its own ssh wait (launch_timeout), plus headroom so the
-  // launcher's own timeout/kill always fires first in the common case; the
-  // worker watchdog is the backstop for when it doesn't (launcher killed /
-  // host died before it could even try).
-  rcp.deadline_sec    = opt.launch_timeout + 10;
-  // --forward-env: ssh launcher only. srun passes the launcher's whole
-  // environment itself (--export=ALL), so an `env` prefix would be redundant;
-  // parse_args already rejected the explicit flags with srun.
-  if (opt.remote_launcher == RemoteLauncher::Ssh && !opt.no_forward_env) {
+  // --forward-env: ssh ranks only. Local ranks inherit this environment, and
+  // srun passes it itself (--export=ALL); parse_args already rejected the
+  // explicit flags with srun.
+  std::vector<std::pair<std::string, std::string>> env;
+  if (!all_local && opt.remote_launcher == RemoteLauncher::Ssh &&
+      !opt.no_forward_env) {
     const std::vector<std::string> patterns =
         parse_forward_env_spec(opt.forward_env);
     if (!patterns.empty()) {
-      rcp.env = select_forward_env(read_process_environment(), patterns);
+      env = select_forward_env(read_process_environment(), patterns);
     }
   }
+
   std::vector<SshRank> specs;
-  specs.reserve(nodes.size());
-  for (int i = 0; i < size; ++i) {
+  specs.reserve(plan.size());
+  for (const RankPlacement& p : plan) {
+    const std::vector<std::string> args =
+        build_worker_args(wp, p, size, rendezvous, vendor);
     SshRank s;
-    s.rank = i;
-    s.node = nodes[i];
-    s.remote_command =
-        build_remote_command(rcp, i, size, remote_binary, rendezvous, vendor);
+    s.rank = p.rank;
+    s.node = p.host;
+    if (p.is_local) {
+      s.local_argv.push_back("/proc/self/exe");
+      s.local_argv.insert(s.local_argv.end(), args.begin(), args.end());
+    } else {
+      s.remote_command = build_remote_command(env, remote_binary, args);
+    }
     specs.push_back(std::move(s));
   }
 
@@ -1374,29 +1331,38 @@ int do_nodes(const Options& opt) {
   lopts.connect_timeout = std::min(10, static_cast<int>(opt.launch_timeout));
 
   const char* const lname = launcher_name(opt.remote_launcher);
-  std::fprintf(stderr,
-               "launching %d rank(s) over %s; rendezvous=%s binary=%s\n",
-               size, lname, rendezvous.c_str(), remote_binary.c_str());
+  auto how = [lname](bool local) { return local ? "local" : lname; };
+  {
+    std::string where;
+    for (const RankPlacement& p : plan) {
+      where += (where.empty() ? "" : ", ") + std::string("rank ") +
+               std::to_string(p.rank) + " on " + p.host + " (" +
+               how(p.is_local) + ")";
+    }
+    const std::string rdv = size == 2 ? "; rendezvous=" + rendezvous : "";
+    std::fprintf(stderr, "launching %d rank(s): %s%s%s%s\n", size, where.c_str(),
+                 rdv.c_str(), all_local ? "" : "; binary=", remote_binary.c_str());
+    note_two_rank_tests(opt, size);
+  }
 
   const std::vector<SshChildResult> children = ssh_launch(specs, lopts);
 
   // Validate every child: launched, exited 0, no timeout. Any failure -> exit 4
-  // with the offending node + a stderr tail for diagnosis.
+  // with the offending host + a stderr tail for diagnosis.
   for (const auto& c : children) {
     if (!c.launched) {
       std::fprintf(stderr,
-                   "error: failed to launch %s for rank %d on %s: %s\n",
-                   lname, c.rank, c.node.c_str(), c.stderr_data.c_str());
+                   "error: failed to launch %s worker for rank %d on %s: %s\n",
+                   how(c.local), c.rank, c.node.c_str(), c.stderr_data.c_str());
       return 4;
     }
     if (c.timed_out) {
       std::fprintf(stderr,
                    "error: rank %d on %s did not complete within the overall "
                    "%lds --launch-timeout for this run — killed (possible "
-                   "unreachable node / rendezvous hang; this deadline covers "
-                   "the whole ssh launch + run, not a single connection "
-                   "attempt — pass a larger --launch-timeout to allow more "
-                   "time)\n",
+                   "unreachable host / rendezvous hang; this deadline covers "
+                   "the whole launch + run, not a single connection attempt "
+                   "— pass a larger --launch-timeout to allow more time)\n",
                    c.rank, c.node.c_str(), opt.launch_timeout);
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
@@ -1404,9 +1370,9 @@ int do_nodes(const Options& opt) {
     }
     if (!c.exited || c.exit_code != 0) {
       std::fprintf(stderr,
-                   "error: rank %d on %s failed (%s/worker exit_code=%d%s) — "
+                   "error: rank %d on %s failed (%s worker exit_code=%d%s) — "
                    "launch/bootstrap failure\n",
-                   c.rank, c.node.c_str(), lname, c.exit_code,
+                   c.rank, c.node.c_str(), how(c.local), c.exit_code,
                    c.term_signal ? ", killed by signal" : "");
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
@@ -1420,11 +1386,13 @@ int do_nodes(const Options& opt) {
   if (!load_policy_or_fail(opt, vendor, policy, rc)) return rc;
   const bool discovery = !policy.present;
 
-  // A multi-node run keeps TwoNode tests; size-1 excludes them (cannot satisfy a
-  // 2-rank test). Mirror the worker's selection scope so the denominator and the
-  // synthesized NA set match what actually ran.
+  // A 2-rank run keeps TwoNode tests; any other size excludes them (they need
+  // exactly 2 ranks). Mirror the worker's selection scope so the denominator and
+  // the synthesized NA set match what actually ran.
   ReportInputs in;
-  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size == 1, in);
+  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size != 2, in);
+  // Placeholder envs: load_rank_results_text() replaces each with the
+  // worker's @env block.
   for (const auto& c : children)
     in.nodes.push_back({c.rank, c.node, EnvironmentInfo{}});
 
@@ -1439,6 +1407,18 @@ int do_nodes(const Options& opt) {
       std::fprintf(stderr, "--- rank %d (%s) stderr tail ---\n%s\n",
                    c.rank, c.node.c_str(), stderr_tail(c.stderr_data).c_str());
       return 4;
+    }
+  }
+
+  // Workers' stderr is only shown on failure, so print each rank's pair (from
+  // its @env block) ahead of the per-test lines.
+  if (!opt.quiet) {
+    for (const auto& n : in.nodes) {
+      const topology::Pair& pair = n.environment.rank_pair;
+      std::fprintf(stderr, "topology: rank %d on %s: %s\n", n.rank, n.host.c_str(),
+                   topology::format_pair(pair).c_str());
+      if (!pair.note.empty())
+        std::fprintf(stderr, "note: rank %d: %s\n", n.rank, pair.note.c_str());
     }
   }
 
@@ -1459,24 +1439,20 @@ int run(const Options& opt) {
       return do_list();
 
     case Mode::Exec:
+      // The parent published its resolved pair; do_exec makes its GPU current.
       return do_exec(opt);
 
     case Mode::Worker:
       return do_worker(opt);
 
-    case Mode::LocalRanks:
-      return do_local_ranks(opt);
-
-    case Mode::Nodes:
-      return do_nodes(opt);
-
     case Mode::Run:
-      // Single-node LAUNCH: worker + policy + Reporter -> report.json + gate.
-      return do_run(opt);
-
     case Mode::None:
-      // No explicit mode requested => default single-node run over the full
-      // registry (the documented default invocation).
+      // None: no explicit mode requested => the default run over the full
+      // registry (the documented default invocation). Several ranks, or a
+      // rank on another host, go through the launcher; a single local rank
+      // runs in-process: worker + policy + Reporter -> report.json + gate.
+      if (!opt.lint && needs_launch(opt)) return do_launch(opt);
+      if (!opt.lint && !apply_topology(opt, /*worker=*/false)) return 2;
       return do_run(opt);
   }
   return 0;
@@ -1532,11 +1508,20 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  // Publish --gid/--device as env vars BEFORE any detect()/device open. setenv
-  // propagates to forked --exec/--worker children automatically (they inherit
-  // the environment); --nodes workers (ssh or srun) get them forwarded as flags (see the
-  // worker arg builder). Capability reads ACCEPT_IB_GID_INDEX/ACCEPT_IB_DEVICE.
+  // Publish --gid/--hca/--device/--local-rank as env vars BEFORE any
+  // detect()/device open. setenv propagates to forked --exec children (they
+  // inherit the environment); launched workers get their own entries as flags
+  // (see build_worker_args). Capability reads ACCEPT_IB_GID_INDEX, and
+  // detect() resolves the pair from ACCEPT_HCA/ACCEPT_DEVICE/
+  // ACCEPT_LOCAL_RANK. A worker's lists hold one entry, so local rank 0's
+  // pick is its own; a launcher's only shapes its own detect().
   if (!opt.gid.empty()) ::setenv("ACCEPT_IB_GID_INDEX", opt.gid.c_str(), 1);
-  if (!opt.device.empty()) ::setenv("ACCEPT_IB_DEVICE", opt.device.c_str(), 1);
+  if (!opt.hca.empty())
+    ::setenv("ACCEPT_HCA", acceptance::topology::get_rank_entry(opt.hca, 0).c_str(), 1);
+  if (!opt.device.empty())
+    ::setenv("ACCEPT_DEVICE",
+             acceptance::topology::get_rank_entry(opt.device, 0).c_str(), 1);
+  if (opt.local_rank >= 0)
+    ::setenv("ACCEPT_LOCAL_RANK", std::to_string(opt.local_rank).c_str(), 1);
   return acceptance::run(opt);
 }

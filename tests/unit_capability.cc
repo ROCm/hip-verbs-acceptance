@@ -9,7 +9,7 @@
 //   * decode_hip_version(int) -- HIP_VERSION integer -> "major.minor.patch".
 //   * find_info_version(start_dir, max_levels) -- walk-up-for-.info/version,
 //     exercised against a temp directory tree created (and removed) here.
-// Both helpers are plain filesystem/arithmetic code with no ACCEPT_HAVE_HIP
+// All are plain filesystem/arithmetic code with no ACCEPT_HAVE_HIP
 // dependency, so they run in every unit_tests build (synthetic and full).
 
 #include <cstdlib>

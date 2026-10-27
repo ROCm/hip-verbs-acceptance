@@ -165,7 +165,8 @@ TestResult Runner::run_in_process(const TestMeta& meta) const {
   }
 
   const auto t0 = std::chrono::steady_clock::now();
-  TestResult result = run_with_probe([&] {
+  const std::string prep_err = opts_.prepare ? opts_.prepare(meta) : std::string();
+  TestResult result = !prep_err.empty() ? fail(prep_err) : run_with_probe([&] {
     try {
       return meta.fn(ctx);
     } catch (const hipw::MissingSymbol& e) {

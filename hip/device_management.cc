@@ -542,7 +542,7 @@ ACCEPT_TEST(Device_P2P_KernelAccess_AllPairs, "hip/device", Topology::Single,
 ACCEPT_TEST(Device_Attr_Probe, "hip/device", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = topology::get_rank_gpu();
   HIP_CHECK(hipSetDevice(dev));
 
   ProbedAttrs attrs;
@@ -560,7 +560,7 @@ ACCEPT_TEST(Device_Attr_Probe, "hip/device", Topology::Single, Kind::Functional,
 ACCEPT_TEST(Hdp_Flush_Ordering, "hip/device", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = topology::get_rank_gpu();
   hipDeviceProp_t prop{};
   HIP_CHECK(hipGetDeviceProperties(&prop, dev));
   if (!is_pre_gfx90a(prop.gcnArchName))
@@ -577,7 +577,7 @@ ACCEPT_TEST(DeviceSetLimit_StackSize, "hip/device", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(topology::get_rank_gpu()));
 
   hipError_t limit_err = hipDeviceSetLimit(hipLimitStackSize, 32 * 1024);
   if (limit_err == hipErrorNotSupported)
@@ -615,7 +615,7 @@ ACCEPT_TEST(DeviceSetLimit_StackSize, "hip/device", Topology::Single,
 ACCEPT_TEST(PointerGetAttributes_DeviceVsHost, "hip/device", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = topology::get_rank_gpu();
   HIP_CHECK(hipSetDevice(dev));
   const size_t bytes = 4096;
 
@@ -723,7 +723,7 @@ ACCEPT_TEST(DriverEntryPoint_Resolve, "hip/device", Topology::Single,
 ACCEPT_TEST(Device_Reset_Mgmt, "hip/devreset", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = topology::get_rank_gpu();
   HIP_CHECK(hipSetDevice(dev));
 
   size_t total = 0;
@@ -753,10 +753,11 @@ ACCEPT_TEST(Device_Reset_Mgmt, "hip/devreset", Topology::Single,
 ACCEPT_TEST(Occupancy_Query, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
+  const int gpu = topology::get_rank_gpu();
   if (!hip_kernels_available()) return skip("requires hiprtc");
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(gpu));
   hipDeviceProp_t prop{};
-  HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+  HIP_CHECK(hipGetDeviceProperties(&prop, gpu));
 
   std::string kernel_err;
   hipFunction_t fn = hip_kernel_function("k_occupancy_probe", &kernel_err);
@@ -781,8 +782,9 @@ ACCEPT_TEST(Occupancy_Query, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Texture_Object_Lifecycle, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
-  if (!device_has_texture(0))
+  const int gpu = topology::get_rank_gpu();
+  HIP_CHECK(hipSetDevice(gpu));
+  if (!device_has_texture(gpu))
     return skip("device has no texture/image hardware (CDNA3+)");
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
@@ -844,7 +846,7 @@ ACCEPT_TEST(Texture_Object_Lifecycle, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Mem_Advise_Info, "hip/libsurface", Topology::Single,
             Kind::Functional, 30) {
   (void)ctx;
-  const int dev = 0;
+  const int dev = topology::get_rank_gpu();
   HIP_CHECK(hipSetDevice(dev));
   const int n = kIndexCount;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
@@ -900,7 +902,7 @@ ACCEPT_TEST(Mem_Advise_Info, "hip/libsurface", Topology::Single,
 ACCEPT_TEST(Memcpy_Symbol, "hip/libsurface", Topology::Single, Kind::Functional,
             30) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
+  HIP_CHECK(hipSetDevice(topology::get_rank_gpu()));
   const int n = 256;
   const size_t bytes = sizeof(int) * static_cast<size_t>(n);
 

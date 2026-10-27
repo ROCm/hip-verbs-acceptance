@@ -462,6 +462,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << "\n            \"gid_index\": "
           << jnum(static_cast<long long>(d.gid_index)) << ","
           << "\n            \"gid_type\": "  << jstr_or_null(d.gid_type) << ","
+          << "\n            \"port_state\": " << jstr_or_null(d.port_state) << ","
           // vendor_id/vendor_part_id are -1 when not queried (default build):
           // emit null in that case, the numeric value otherwise.
           << "\n            \"vendor_id\": "
@@ -512,6 +513,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << (j ? "," : "")
           << "\n          {"
           << "\n            \"ordinal\": "   << jnum(static_cast<long long>(g.ordinal)) << ","
+          << "\n            \"hip_ordinal\": " << jnum(static_cast<long long>(g.hip_ordinal)) << ","
           << "\n            \"bdf\": "       << jstr_or_null(g.bdf) << ","
           << "\n            \"numa_node\": " << jnum(static_cast<long long>(g.numa_node)) << ","
           << "\n            \"arch\": "      << jstr_or_null(g.arch)
@@ -525,10 +527,20 @@ int write_report(const Policy& policy, const ReportInputs& in,
       nodes_json
           << (j ? "," : "")
           << " {\"gpu\": " << jnum(static_cast<long long>(a.gpu_ordinal))
-          << ", \"nearest_nic\": " << jstr_or_null(a.nearest_nic) << "}";
+          << ", \"nearest_nic\": " << jstr_or_null(a.nearest_nic)
+          << ", \"ambiguous\": " << jbool(a.ambiguous) << "}";
     }
+    const topology::Pair& pair = env.rank_pair;
     nodes_json
         << "]"
+        << "\n      },"
+        << "\n      \"topology\": {"
+        << "\n        \"hca\": "        << jstr_or_null(pair.hca) << ","
+        << "\n        \"gpu\": "        << jnum(static_cast<long long>(pair.gpu)) << ","
+        << "\n        \"hca_source\": " << jstr_or_null(pair.hca_source) << ","
+        << "\n        \"gpu_source\": " << jstr_or_null(pair.gpu_source) << ","
+        << "\n        \"local\": "      << jbool(pair.local) << ","
+        << "\n        \"note\": "       << jstr_or_null(pair.note)
         << "\n      }"
         << "\n    }";
   }
@@ -560,16 +572,26 @@ int write_report(const Policy& policy, const ReportInputs& in,
     }
   }
 
+  std::string launch_hosts = "[";
+  for (size_t i = 0; i < in.launch.hosts.size(); ++i)
+    launch_hosts += (i ? ", " : "") + jstr(in.launch.hosts[i]);
+  launch_hosts += "]";
+
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.2") << ","
+      << "\n  \"schema_version\": " << jstr("1.3") << ","
       << "\n  \"harness\": {"
       << "\n    \"version\": " << jstr(kHarnessVersion) << ","
       << "\n    \"git_sha\": "  << jstr(kGitSha)
       << "\n  },"
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
+      << "\n  \"launch\": {"
+      << "\n    \"np\": "    << jnum(static_cast<long long>(in.launch.np)) << ","
+      << "\n    \"ppn\": "   << jnum(static_cast<long long>(in.launch.ppn)) << ","
+      << "\n    \"hosts\": " << launch_hosts
+      << "\n  },"
       << "\n  \"summary\": {"
       << "\n    \"passed\": "         << jnum(static_cast<long long>(n_pass)) << ","
       << "\n    \"failed\": "         << jnum(static_cast<long long>(n_fail)) << ","

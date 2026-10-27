@@ -33,6 +33,7 @@
 
 #include "common/Bootstrap.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 namespace verbsx {
@@ -129,17 +130,16 @@ inline Gate gate(Bootstrap* b, Gate mine) {
   return g;
 }
 
-// If --device/ACCEPT_IB_DEVICE requested a specific NIC, verify the QP
-// actually opened on it. Guards against regressing the bug where --device
-// only steered Capability's reported vendor/GID while RcConn::open()/
+// If a NIC was selected (ACCEPT_HCA: --hca or GPU-NIC affinity), verify the
+// QP actually opened on it. Guards against regressing the bug where --device
+// (now --hca) only steered Capability's reported vendor/GID while RcConn::open()/
 // UdConn::open() silently picked a different physical device for the
 // connect itself. Returns "" when there's no request to check, or the
 // request was honored; otherwise a reason.
 inline std::string check_requested_device(const std::string& opened) {
-  const char* want = std::getenv("ACCEPT_IB_DEVICE");
-  if (want == nullptr || *want == '\0' || opened == want) return "";
-  return "connected on '" + opened + "' but ACCEPT_IB_DEVICE requested '" +
-         std::string(want) + "'";
+  const std::string want = topology::get_rank_hca();
+  if (want.empty() || opened == want) return "";
+  return "connected on '" + opened + "' but the selected HCA is '" + want + "'";
 }
 
 // Open a device + RC QP and connect it to the peer (INIT->RTR->RTS), exchanging

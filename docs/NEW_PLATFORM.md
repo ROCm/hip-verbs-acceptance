@@ -41,8 +41,8 @@ cmake --build build -j
 
 # HIP (single node)
 ./build/hva --filter-category 'hip/*' --kind func --report hip_discovery.json
-# Verbs (two ranks on one host, or --nodes h1,h2 across two)
-./build/hva --local-ranks 2 --filter-category 'verbs/*' \
+# Verbs (two ranks on one host, or add -hosts h1,h2 for two nodes)
+./build/hva -n 2 --filter-category 'verbs/*' \
       --kind func --report verbs_discovery.json
 ```
 

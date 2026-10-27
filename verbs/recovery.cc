@@ -55,6 +55,7 @@
 #include "common/Bootstrap.hpp"
 #include "common/Capability.hpp"
 #include "common/TestRegistry.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 
@@ -349,7 +350,7 @@ ACCEPT_TEST(vat_rc_qp_reset_recovery_loopback, "verbs/recovery", Topology::Singl
   (void)ctx;
 
   // Open the RDMA device (raw, no RcConn -- mirrors the repro), honoring
-  // --device (ACCEPT_IB_DEVICE) like RcConn::open() does so this test runs on
+  // the selected HCA (ACCEPT_HCA) like RcConn::open() does so this test runs on
   // the platform the operator selected rather than whatever
   // ibv_get_device_list happens to list first.
   int num_devs = 0;
@@ -360,7 +361,7 @@ ACCEPT_TEST(vat_rc_qp_reset_recovery_loopback, "verbs/recovery", Topology::Singl
   }
   struct ibv_device* dev = nullptr;
   struct ibv_context* dctx = nullptr;
-  if (const char* want = std::getenv("ACCEPT_IB_DEVICE"); want != nullptr && *want != '\0') {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     for (int i = 0; i < num_devs; ++i) {
       const char* name = ibv_get_device_name(dev_list[i]);
       if (name != nullptr && want == std::string(name)) { dev = dev_list[i]; break; }
@@ -746,10 +747,10 @@ ACCEPT_TEST(vat_ionic_sq_sig_all, "verbs/recovery", Topology::Single,
     if (list) ibvw::safe_free_device_list(list);
     return skip("no RDMA devices present on this host");
   }
-  // Honor --device (ACCEPT_IB_DEVICE) like RcConn::open() does, else the first
+  // Honor the selected HCA (ACCEPT_HCA) like RcConn::open() does, else the first
   // enumerated device.
   int idx = 0;
-  if (const char* want = std::getenv("ACCEPT_IB_DEVICE"); want != nullptr && *want != '\0') {
+  if (const std::string want = topology::get_rank_hca(); !want.empty()) {
     idx = -1;
     for (int i = 0; i < num; ++i) {
       const char* name = ibv_get_device_name(list[i]);

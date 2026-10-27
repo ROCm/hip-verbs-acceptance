@@ -16,7 +16,7 @@ primary signal; performance metrics are collected opt-in via `--kind perf|all`
 > own **key=value** `TestResult` file (not JSON — only the final `report.json` is
 > JSON); (b) `SocketBootstrap` listener binds `0.0.0.0` and the connector resolves
 > hostnames via `getaddrinfo` (§4 — found necessary on real 2-node hardware);
-> (c) the ssh **`--nodes` multi-node launcher** returns each worker's results on
+> (c) the **`-n` / `-hosts` launcher** returns each worker's results on
 > its stdout; the launcher must run on a host with a runtime compatible with the
 > binary (see §13).
 
@@ -129,7 +129,7 @@ It runs in one of three modes, selected by argv:
             ┌──────────────────────────────────────────────────────────┐
             │  hva  (one binary, three modes)                            │
             ├──────────────────────────────────────────────────────────┤
-  --nodes   │  LAUNCH mode  → parse CLI, ssh-deploy, start workers,      │
+  -n/-hosts │  LAUNCH mode  → parse CLI, ssh-deploy, start workers,      │
             │                 collect per-node JSON, merge → report      │
             ├──────────────────────────────────────────────────────────┤
   --worker  │  WORKER mode  → SocketBootstrap (rank/size/rendezvous),   │
@@ -243,13 +243,18 @@ node-validated. Rank→worker args are passed on the **CLI**
 on each ssh child's stdout. Step 1 below is currently same-path/NFS (scp-deploy for
 non-shared-FS is deferred — §13).*
 
-1. LAUNCH mode resolves the node list (`--nodes`) and runs each node's binary at
+1. LAUNCH mode places the ranks over `-hosts` (block order, `-ppn` per host;
+   a host named by this machine's name, or by one of its interface addresses,
+   is local and fork/exec'd) and runs each remote rank's binary at
    `--remote-binary` (default: the launcher's own path — same-path/shared-FS
    assumption; scp-deploy is deferred, §13).
 2. Starts each node's binary in WORKER mode, passing `rank`, `size`, and the
    rank-0 `rendezvous host:port`.
-3. Workers construct `SocketBootstrap`, rendezvous, run their tests, and stream
-   their node-local result set back on stdout (`--results-out -`).
+3. Workers run their tests and stream their node-local result set back on
+   stdout (`--results-out -`). Only a 2-rank run constructs `SocketBootstrap`
+   and rendezvous first: the TwoNode tests need exactly 2 ranks, so any other
+   `-n` leaves them out (with a `note:`) and runs the single-rank tests on every
+   rank.
 4. LAUNCH mode collects the per-node results and the Reporter merges them.
 
 ---
@@ -279,10 +284,8 @@ Detected automatically — never configured:
 - **iface / PCIe BDF** — from sysfs (`/sys/class/infiniband/<dev>/device` → BDF;
   associated netdev → iface). Needed by link-down/nicctl tests; not configured.
 - **Versions** — ROCm/HIP runtime + driver, NIC driver/FW. Recorded dimensions.
-- **GPU count** — recorded as a dimension. **Rank→GPU binding is not implemented**
-  in the harness: `EnvironmentInfo` carries no `local_rank`/`gpu_bound`, and tests
-  do not auto-bind a GPU by local rank. With size ≤ 2 and one rank per node (the
-  common case) tests use GPU 0; explicit multi-GPU binding is future work (§13).
+- **GPU count** — recorded as a dimension. Each rank binds one GPU (by default
+  its local rank) and one NIC; see the selection rules below.
 - **Optional symbols, present/absent** — via `dlopen`/`dlsym`:
   `libionic` (ionic direct-verbs), `hsa_amd_portable_export_dmabuf`, optional
   HIP/cuMem entry points. This implements the spec's `Symbol_Version_Detection`
@@ -293,10 +296,33 @@ Detected automatically — never configured:
 through thin shims in `wrapper/`, so the binary loads and reports cleanly on a node
 missing them rather than failing to start. (`-ldl`, `pthread` are the hard deps.)
 
-**Device selection is deterministic and logged:** "first active RoCE device" is
-defined as the lowest-named active RoCEv2 port, and the chosen device is recorded
-per node. Nodes with multiple RDMA devices use a **`--device <name>`** override
-(implemented; also `ACCEPT_IB_DEVICE`) to disambiguate.
+**GPU and NIC selection is deterministic and logged** (`common/Topology.*`).
+Each rank resolves one GPU (HIP ordinal) and one RDMA device (HCA):
+
+| Given | GPU | HCA |
+|---|---|---|
+| `--hca` + `--device` | as given | as given (`note` if it is not the GPU's nearest) |
+| `--hca` only | lowest HIP GPU whose nearest NIC is the HCA | as given |
+| `--device` only | as given | the GPU's nearest NIC if ACTIVE, else the first ACTIVE NIC |
+| neither | the local rank (GPU 0 if not visible) | as for `--device` only |
+
+Both flags take one value or one per local rank; the launcher passes each
+worker its own entry plus `--local-rank`. "Nearest" is the NIC whose sysfs
+PCIe path shares the deepest ancestor with the GPU's (same switch beats same
+root port); a tie (`ambiguous`) or no affinity falls back to the
+first ACTIVE NIC with a `note` — never an error. HIP ordinals are mapped to KFD
+GPUs by PCI BDF, so `HIP_VISIBLE_DEVICES` does not skew the affinity. A
+`topology:` line on stderr shows the pair before the test lines (a launcher
+prints it for every rank from the workers' `@env` blocks). The rank
+then `hipSetDevice()`s its GPU and publishes the pair as `ACCEPT_HCA` /
+`ACCEPT_DEVICE`, which the verbs device-open paths and the HIP tests read
+(`topology::get_rank_hca()` / `get_rank_gpu()`) and the isolated `--exec`
+children inherit. The GPU is made current again before every test body,
+isolated or in-process, except tests that `fork()` before their first HIP call
+(`hip/ipc`,
+`Vmm_Reclaim_Cycles_CrossProcess`), which select it themselves. If that fails
+on a host with GPUs, the rank exits 2 at startup, or the test fails. The pair
+is recorded per node as `topology`.
 
 The cluster is assumed **homogeneous**, but "homogeneous" is treated as a
 *rollup, not a precondition* (per review): each node's descriptor is recorded
@@ -618,13 +644,15 @@ selection filter narrowed the run.
 
 ```jsonc
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "harness": { "version": "0.1.0-phase1", "git_sha": "9133e10-dirty" },
                                                 // build-time harness version + git SHA;
                                                 // git_sha is "unknown" for a build with
                                                 // no .git (e.g. a source tarball)
   "mode": "gate",                              // gate | discovery
   "filtered": false,                           // true when --filter*/--kind narrowed the run
+  "launch": { "np": 2, "ppn": 1, "hosts": ["node-a", "node-b"] },
+                                                // -n / -ppn / -hosts shape of the run
   "summary": { "passed": 0, "failed": 0, "skipped": 0, "not_applicable": 0 },
   "homogeneous": true,                         // rollup; false → inspect per-node env
   "nodes": [
@@ -642,8 +670,14 @@ selection filter narrowed the run.
             "node_guid": "…", "gid_index": 3, "gid_type": "RoCEv2",
             "vendor_id": null, "vendor_part_id": null }
         ],
-        "gpu_devices": [ { "ordinal": 0, "bdf": "…", "numa_node": 0, "arch": "gfx…" } ],
-        "gpu_nic_affinity": [ { "gpu": 0, "nearest_nic": "bnxt_re0" } ]
+        "gpu_devices": [ { "ordinal": 0, "hip_ordinal": 0, "bdf": "…", "numa_node": 0, "arch": "gfx…" } ],
+        "gpu_nic_affinity": [ { "gpu": 0, "nearest_nic": "bnxt_re0", "ambiguous": false } ]
+      },
+      "topology": {                            // the GPU / NIC this rank used
+        "hca": "bnxt_re0", "gpu": 0,
+        "hca_source": "affinity", "gpu_source": "default",  // user | affinity | default
+        "local": true,                         // hca is the gpu's nearest NIC
+        "note": null                           // why a fallback was taken
       } },
     { "host": "node-b", "rank": 1, "environment": { "...": "..." } }
   ],
@@ -740,6 +774,7 @@ hip-verbs-acceptance/
                           # e.g. connectx.csv, thor.csv, ionic.csv, mi350_thor.csv
   common/                 # Types, TestRegistry, Runner (isolation+watchdog),
                           # Bootstrap + SocketBootstrap, Capability probe,
+                          # Topology (GPU-NIC affinity, rank GPU/HCA),
                           # Policy (CSV) loader, Reporter (JSON), Perf
   wrapper/                # dlopen/dlsym shims for libibverbs / libamdhip64
   vendor/                 # vendored rocm-headers / rdma-core-headers
@@ -765,7 +800,7 @@ directory — mixed HIP+verbs tests live under `verbs/`.*
   automatic build-triple/glibc verification yet.
 - **Environment (as-built).** ssh workers do **not** otherwise share the
   launcher's environment — they start with the remote login environment, which
-  can point at a different (or no) ROCm. `--nodes` now forwards a fixed list of
+  can point at a different (or no) ROCm. The ssh launcher now forwards a fixed list of
   launcher environment variables to each worker by default
   (`LD_LIBRARY_PATH,ROCM_PATH,PATH,HIP_VISIBLE_DEVICES,ROCR_VISIBLE_DEVICES,HSA_*,ACCEPT_*`;
   `--forward-env` overrides the list, `--no-forward-env` disables it). This is a
@@ -790,7 +825,7 @@ environment is auto-detected.
 
 ```
 hva                            # single-node loopback, all func tests
-hva --nodes h1,h2              # multi-node launcher (ssh or srun)
+hva -n <n> [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
            [--remote-launcher ssh|srun]     # default: ssh
            [--ssh-user <name>]              # default: ~/.ssh/config / current user
            [--port <n>] [--remote-binary <path>] [--launch-timeout <sec>]
@@ -803,21 +838,23 @@ hva --nodes h1,h2              # multi-node launcher (ssh or srun)
            [--filter-class <class>]         # select by policy class
            [--filter-category <glob>]       # select by ACCEPT_TEST category field
            [--policy ./policy/thor.csv]     # direct path to policy CSV; auto-selected from
-                                            # <binary_dir>/policy/<gpu>_<nic>.csv → <nic>.csv;
+                                            # <binary_dir>/policy/<gpu>_<nic>.csv → <nic>.csv
+                                            # (no NIC: <gpu>.csv);
                                             # missing → WARN + all MUST_PASS (gate active)
            [--vendor <name>]                # override vendor auto-detection
            [--report ./report.json]         # always the full report (no --verbose)
            [--results-out <path|->]         # worker result file (- = stdout)
            [--isolate all|none]             # process-isolation scope (default: all)
-           [--gid <index>] [--device <name>]  # override GID / RDMA device selection
+           [--gid <index>]                  # override GID selection
+           [--hca <name>[,...]]             # RDMA device per local rank
+           [--device <n>[,...]]             # GPU (HIP ordinal) per local rank
            [--hide-na]                      # suppress NA rows from console
            [--lint]                         # list unlisted tests, exit non-zero, no run
            [--quiet]                        # suppress the per-test console stream
-           [--local-ranks <n>]              # ranks per host (single-host multi-rank)
 ```
 
 Internal modes (used by the launcher, not typed by hand):
-`--worker --rank <r> --size <n> --rendezvous <host:port>` and
+`--worker --rank <r> --local-rank <l> --size <n> --rendezvous <host:port>` and
 `--exec <test_id>`. `--filter` is an **fnmatch glob** on the test id (no
 GoogleTest). **Not implemented:** `--verbose`, `--dump-requirements`,
 `--allow-destructive`. Run `hva --help` for the current set.
@@ -829,7 +866,7 @@ GoogleTest). **Not implemented:** `--verbose`, `--dump-requirements`,
 | Phase | Deliverable | Spec step | State |
 |---|---|---|---|
 | 1 | Harness end-to-end (registry, EXEC isolation+watchdog, policy/classification, Reporter §7.3, SocketBootstrap size≤2, CMake) proven by a synthetic self-test covering every failure mode + a **2-rank smoke validated on two real nodes**. | 3 | **✅ done** |
-| 1b | Real ssh **`--nodes` multi-node launcher + merge** into one gated `report.json`. | 3 | **✅ done** |
+| 1b | Real ssh **multi-node launcher (`-hosts`) + merge** into one gated `report.json`. | 3 | **✅ done** |
 | 2 | `verbs/` functional — `vat_common` helpers + the `vat_*` tests; capability/vendor probe. | 4 | **✅ done** |
 | 3 | `hip/` functional | 6 | **✅ done** |
 | 4 | mixed HIP+verbs functional (under `verbs/`) | 8 | **✅ done** |
@@ -849,7 +886,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
 
 **Phase 1b — DONE & node-validated:**
 
-- **Real ssh `--nodes h1,h2` launcher + report merge** is built: ssh-launches one
+- **Real ssh `-n 2 -hosts h1,h2` launcher + report merge** is built: ssh-launches one
   worker/node (rank/size/rendezvous = node0:port), captures each rank's results on
   its ssh child's **stdout** (`--results-out -`; no shared-FS dependency), bounded
   (`ConnectTimeout` + `--launch-timeout`), Reporter merges → one gated
@@ -867,7 +904,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   resolve hostnames via `getaddrinfo` (not just `inet_pton`). See §4 note.
 - **Orchestration:** double-hop ssh collapses quoting (pipe scripts via stdin);
   `ssh` eats stdin on fan-out (use `ssh -n`); NFS needs close-to-open settle
-  (`sync; sleep`) before reading a peer-written file. The `--nodes` launcher must
+  (`sync; sleep`) before reading a peer-written file. The `-hosts` launcher must
   bake these in.
 
 **Open dependencies (block specific functionality, not the harness):**
@@ -886,7 +923,6 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
 - **Privileged / destructive tests** (link-down, `nicctl`) + an
   `--allow-destructive` gate (§10.1) — not yet built.
 - **`--dump-requirements`** cross-vendor matrix rendering and `--verbose`.
-- **Rank→GPU binding** for single-host multi-rank runs (§5).
 
 - True **N-rank `SocketBootstrap`** (allgather/barrier for size > 2) — current
   scope is size ≤ 2, which covers the entire VAT set; pairs with the launcher
@@ -906,8 +942,9 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   inside an allocation).
 - `fw_version`-ranged classification entries (firmware-aware gating).
 - Performance baselines + tolerance-based regression gating (§9).
-- Multi-NIC-per-node and full heterogeneous-cluster support (current assumption:
-  homogeneous; per-node descriptors recorded and mismatch flagged, not fatal).
+- Full heterogeneous-cluster support (current assumption: homogeneous;
+  per-node descriptors recorded and mismatch flagged, not fatal). Multi-NIC
+  nodes are handled per rank by `--hca` / GPU-NIC affinity (§5).
 
 **Robustness follow-ups (review):**
 
@@ -917,7 +954,7 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
   downstream failures. The fork-per-isolated-test model (§6.3) already gives a
   fresh device open; the probe closes the remaining gap.
 - **Distributed-level watchdog — DONE for "launcher gave up":** every
-  worker the launcher spawns (`--nodes` ssh, `--local-ranks`) now gets a
+  worker the launcher spawns (local, ssh or srun) now gets a
   `--deadline-sec` (`launch_timeout + 10`) and arms a watchdog thread at
   startup: `setpgid(0,0)` so it leads its own process group, then on expiry
   it logs one line, kills the group of the isolated `--exec` test it is

@@ -78,16 +78,17 @@ std::string sweep_one_size(size_t bytes, bool async, int peer, PerfSink& perf) {
   const std::string mode = async ? "async" : "sync";
   const std::string size_tag = " (S=" + std::to_string(bytes) + ", " + mode + ")";
 
-  if (hipSetDevice(0) != hipSuccess)
-    return "hipSetDevice(0)" + size_tag;
+  const int dev = topology::get_rank_gpu();
+  if (hipSetDevice(dev) != hipSuccess)
+    return "hipSetDevice(" + std::to_string(dev) + ")" + size_tag;
 
   Stream stream;
   if (async && stream.create() != hipSuccess)
     return "hipStreamCreate" + size_tag;
   hipStream_t active_stream = async ? stream.get() : nullptr;
 
-  DeviceBuffer source;        // GPU 0 source
-  DeviceBuffer dest_d2d;      // GPU 0 D2D destination
+  DeviceBuffer source;        // selected-GPU source
+  DeviceBuffer dest_d2d;      // selected-GPU D2D destination
   DeviceBuffer dest_peer;     // peer GPU P2P destination
   if (source.allocate(bytes) != hipSuccess)
     return "hipMalloc(source)" + size_tag;
@@ -105,7 +106,7 @@ std::string sweep_one_size(size_t bytes, bool async, int peer, PerfSink& perf) {
   if (!verify_error.empty())
     return "H2D/D2H " + verify_error + size_tag;
 
-  // D2D on GPU 0.
+  // D2D on the selected GPU.
   copy_status = perf_memcpy(perf, "d2d." + mode, dest_d2d.get(), source.get(),
                             bytes, hipMemcpyDeviceToDevice, active_stream);
   if (copy_status != hipSuccess)
@@ -114,17 +115,17 @@ std::string sweep_one_size(size_t bytes, bool async, int peer, PerfSink& perf) {
   if (!verify_error.empty())
     return "D2D " + verify_error + size_tag;
 
-  // P2P (GPU 0 -> peer) when a peer is available.
+  // P2P (selected GPU -> peer) when a peer is available.
   if (peer >= 0) {
     if (hipSetDevice(peer) != hipSuccess)
       return "hipSetDevice(peer)" + size_tag;
     if (dest_peer.allocate(bytes) != hipSuccess)
       return "hipMalloc(peer)" + size_tag;
-    (void)hipSetDevice(0);
+    (void)hipSetDevice(dev);
 
     copy_status = perf_memcpy(perf, "p2p." + mode, dest_peer.get(),
                               source.get(), bytes, hipMemcpyDeviceToDevice,
-                              active_stream, peer, /*src_device=*/0);
+                              active_stream, peer, /*src_device=*/dev);
     if (copy_status != hipSuccess)
       return "P2P: " + std::string(hipGetErrorString(copy_status)) + size_tag;
     verify_error = verify_device_bytes(dest_peer.as<unsigned char>(), reference);
@@ -373,19 +374,21 @@ ACCEPT_TEST(Memcpy_D2H_Async, "hip/datamovement", Topology::Single,
 ACCEPT_TEST(Memcpy_Size_Sweep, "hip/datamovement", Topology::Single,
             Kind::Functional, 180) {
   (void)ctx;
-  HIP_CHECK(hipSetDevice(0));
+  const int dev = topology::get_rank_gpu();
+  HIP_CHECK(hipSetDevice(dev));
 
   int device_count = 0;
   HIP_CHECK(hipGetDeviceCount(&device_count));
   int peer = -1;
-  for (int device = 1; device < device_count && peer < 0; ++device) {
+  for (int device = 0; device < device_count && peer < 0; ++device) {
+    if (device == dev) continue;
     int can_access = 0;
-    HIP_CHECK(hipDeviceCanAccessPeer(&can_access, 0, device));
+    HIP_CHECK(hipDeviceCanAccessPeer(&can_access, dev, device));
     if (can_access)
       peer = device;
   }
   if (peer >= 0) {
-    const std::string peer_err = enable_peer_access_idempotent(0, peer);
+    const std::string peer_err = enable_peer_access_idempotent(dev, peer);
     if (!peer_err.empty()) return fail(peer_err);
   }
 

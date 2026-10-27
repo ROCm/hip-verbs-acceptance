@@ -16,6 +16,7 @@
 #include <cstring>
 
 #include "common/Capability.hpp"
+#include "common/Topology.hpp"
 
 namespace acceptance {
 namespace verbsx {
@@ -60,17 +61,10 @@ RcConn::~RcConn() {
 
 std::string RcConn::open(const std::string& dev_name, bool& no_device) {
   no_device = false;
-  // Empty dev_name means "auto-select"; honor ACCEPT_IB_DEVICE (set from
-  // --device) first, the same override Capability::detect() applies to the
-  // reported environment/GID lookup, so --device actually steers the connect
-  // path instead of only the reported vendor/GID.
-  std::string target = dev_name;
-  if (target.empty()) {
-    if (const char* want = std::getenv("ACCEPT_IB_DEVICE");
-        want != nullptr && *want != '\0') {
-      target = want;
-    }
-  }
+  // Empty dev_name means "auto-select": open this rank's selected HCA
+  // (ACCEPT_HCA, see Topology.hpp) -- the device the environment report and
+  // its GID lookup name -- so the connect path uses that NIC too.
+  std::string target = dev_name.empty() ? topology::get_rank_hca() : dev_name;
   int num = 0;
   struct ibv_device** list = ibv_get_device_list(&num);
   if (list == nullptr) return errno_str("ibv_get_device_list failed");

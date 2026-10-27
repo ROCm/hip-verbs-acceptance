@@ -355,7 +355,7 @@ LOG_F="$TMP/twonode.log"
 # (q) below exercises it on its own, with the env var set) and would
 # otherwise show up here as an unrelated MUST_PASS/skip gate-fail row since
 # ACCEPT_SYN_HANG is not set in this invocation.
-run_bin "$LOG_F" --local-ranks 2 --filter 'syn2_[!h]*' --vendor synthetic \
+run_bin "$LOG_F" -n 2 --filter 'syn2_[!h]*' --vendor synthetic \
         --policy "$POLICY/synthetic.csv" --report "$REP_F"
 RC_F=$RC
 
@@ -413,6 +413,11 @@ ranks = sorted(n.get("rank") for n in rep.get("nodes", []))
 if ranks != [0, 1]:
     errs.append("nodes[] ranks=%r expected [0, 1]" % ranks)
 
+# launch{} records the -n / -ppn / -hosts shape: both ranks on localhost.
+launch = rep.get("launch")
+if launch != {"np": 2, "ppn": 2, "hosts": ["localhost"]}:
+    errs.append("launch=%r expected {np:2, ppn:2, hosts:[localhost]}" % launch)
+
 if errs:
     print("\n".join(errs)); sys.exit(1)
 sys.exit(0)
@@ -437,7 +442,7 @@ LOG_G="$TMP/unreach.log"
 rm -f "$REP_G"
 # Hard wall: 30s. With .invalid the resolve fails instantly; --launch-timeout is
 # a belt-and-suspenders bound on the overall ssh deadline.
-timeout 30 "$BIN" --nodes nosuchhost1.invalid,nosuchhost2.invalid \
+timeout 30 "$BIN" -n 2 -hosts nosuchhost1.invalid,nosuchhost2.invalid \
     --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_G" \
     --launch-timeout 20 >"$LOG_G" 2>&1
 RC_G=$?
@@ -563,7 +568,7 @@ fi
 # ===========================================================================
 REP_J="$TMP/rep_env.json"
 LOG_J="$TMP/env.log"
-ACCEPT_FAKE_ENV=1 timeout 60 "$BIN" --local-ranks 2 --filter 'syn2_*' \
+ACCEPT_FAKE_ENV=1 timeout 60 "$BIN" -n 2 --filter 'syn2_*' \
     --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_J" >"$LOG_J" 2>&1
 RC_J=$?
 
@@ -733,7 +738,9 @@ fi
 # --ssh-user), this drives the SAME 2-rank TwoNode path as check (f), but
 # through build_srun_argv / the srun exec path in SshLauncher.cpp instead of
 # ssh — proving the launcher dispatch, the srun argv shape, and the
-# launcher-naming in do_nodes's messages all work end-to-end.
+# launcher-naming in do_launch's messages all work end-to-end. The hosts are
+# 127.0.0.2/127.0.0.3: not "this host" to the launcher (so both ranks go
+# through srun), yet still loopback, so rank 1 can dial rank 0's rendezvous.
 # ===========================================================================
 FAKEBIN="$TMP/fakebin"
 mkdir -p "$FAKEBIN"
@@ -761,7 +768,7 @@ chmod +x "$FAKEBIN/srun"
 REP_L="$TMP/rep_srun.json"
 LOG_L="$TMP/srun.log"
 PATH="$FAKEBIN:$PATH" SLURM_JOB_ID=999999 \
-  run_bin "$LOG_L" --nodes localhost,localhost --remote-launcher srun \
+  run_bin "$LOG_L" -n 2 -ppn 1 -hosts 127.0.0.2,127.0.0.3 --remote-launcher srun \
           --filter 'syn2_*' --vendor synthetic --policy "$POLICY/synthetic.csv" \
           --report "$REP_L"
 RC_L=$RC
@@ -769,7 +776,7 @@ RC_L=$RC
 if [ ! -f "$REP_L" ]; then
   fail "srun launcher end-to-end" "no report written: $REP_L"
   cat "$LOG_L"
-elif ! grep -q 'launching 2 rank(s) over srun' "$LOG_L"; then
+elif ! grep -q 'rank 0 on 127.0.0.2 (srun), rank 1 on 127.0.0.3 (srun)' "$LOG_L"; then
   fail "srun launcher end-to-end" "launcher banner did not name srun"
   cat "$LOG_L"
 else
@@ -821,15 +828,15 @@ fi
 # srun combined with --forward-env / --no-forward-env (SLURM_JOB_ID set, so
 # the forward-env rejection is what fires).
 # ===========================================================================
-V1_OUT=$("$BIN" --nodes localhost --remote-launcher bogus 2>&1 >/dev/null)
+V1_OUT=$("$BIN" -hosts nosuchhost.invalid --remote-launcher bogus 2>&1 >/dev/null)
 RC_V1=$?
-V2_OUT=$("$BIN" --nodes localhost --remote-launcher srun --ssh-user foo 2>&1 >/dev/null)
+V2_OUT=$("$BIN" -hosts nosuchhost.invalid --remote-launcher srun --ssh-user foo 2>&1 >/dev/null)
 RC_V2=$?
-V3_OUT=$(env -u SLURM_JOB_ID "$BIN" --nodes localhost --remote-launcher srun 2>&1 >/dev/null)
+V3_OUT=$(env -u SLURM_JOB_ID "$BIN" -hosts nosuchhost.invalid --remote-launcher srun 2>&1 >/dev/null)
 RC_V3=$?
-V4_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --forward-env ROCM_PATH 2>&1 >/dev/null)
+V4_OUT=$(SLURM_JOB_ID=12345 "$BIN" -hosts nosuchhost.invalid --remote-launcher srun --forward-env ROCM_PATH 2>&1 >/dev/null)
 RC_V4=$?
-V5_OUT=$(SLURM_JOB_ID=12345 "$BIN" --nodes localhost --remote-launcher srun --no-forward-env 2>&1 >/dev/null)
+V5_OUT=$(SLURM_JOB_ID=12345 "$BIN" -hosts nosuchhost.invalid --remote-launcher srun --no-forward-env 2>&1 >/dev/null)
 RC_V5=$?
 
 if [ "$RC_V1" -eq 2 ] && [ "$RC_V2" -eq 2 ] && [ "$RC_V3" -eq 2 ] &&
@@ -846,7 +853,7 @@ fi
 # ===========================================================================
 # Check (n): --version prints a non-empty harness version and git SHA, and
 # report.json carries the same two values in a top-level "harness" object
-# (additive; schema_version "1.2").
+# (additive; schema_version "1.3").
 # ===========================================================================
 LOG_N="$TMP/version.log"
 run_bin "$LOG_N" --version
@@ -875,8 +882,11 @@ import json, sys
 with open(sys.argv[1]) as f:
     rep = json.load(f)
 errs = []
-if rep.get("schema_version") != "1.2":
-    errs.append("schema_version=%r expected '1.2'" % rep.get("schema_version"))
+if rep.get("schema_version") != "1.3":
+    errs.append("schema_version=%r expected '1.3'" % rep.get("schema_version"))
+# A single in-process rank still records its launch shape.
+if rep.get("launch") != {"np": 1, "ppn": 1, "hosts": ["localhost"]}:
+    errs.append("launch=%r expected {np:1, ppn:1, hosts:[localhost]}" % rep.get("launch"))
 harness = rep.get("harness")
 if not isinstance(harness, dict):
     errs.append("top-level 'harness' object missing or not a dict: %r" % harness)
@@ -890,28 +900,28 @@ if errs:
 sys.exit(0)
 PYEOF
   if [ $? -eq 0 ]; then
-    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.2"
+    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.3, launch{}"
   else
     fail "harness block in report.json" "$(cat "$TMP/n_out.txt")"
   fi
 fi
 
 # ===========================================================================
-# Check (o): --local-ranks forwards --filter-category (and --filter-class,
-# --hide-na, --gid, --device) to its spawned workers, same as --nodes already
-# does. Every registered synthetic test shares category "synthetic", so this
+# Check (o): -n 2 forwards --filter-category (and --filter-class, --hide-na,
+# --gid, --device) to its spawned workers, as it does for remote ranks (one
+# argv builder, build_worker_args, serves both). Every registered synthetic test shares category "synthetic", so this
 # build cannot show --filter-category actually EXCLUDING a test (there is no
 # second category to exclude); what this check CAN and does prove is that the
-# flag is accepted and parsed cleanly by both execv'd workers (before this
-# change, do_local_ranks silently dropped it, so a worker never saw it and
-# could not fail on it either) and that the 2-rank reconciliation still
+# flag is accepted and parsed cleanly by both execv'd workers (a local
+# launcher once silently dropped it, so a worker never saw it and could not
+# fail on it either) and that the 2-rank reconciliation still
 # produces the exact same result as the equivalent run without the flag
 # (check (f)) -- i.e. forwarding it is not a no-op path that happens to also
 # not break anything.
 # ===========================================================================
 REP_O="$TMP/rep2_cat.json"
 LOG_O="$TMP/twonode_cat.log"
-run_bin "$LOG_O" --local-ranks 2 --filter 'syn2_*' --filter-category synthetic \
+run_bin "$LOG_O" -n 2 --filter 'syn2_*' --filter-category synthetic \
         --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_O"
 RC_O=$RC
 
@@ -959,7 +969,7 @@ if errs:
 sys.exit(0)
 PYEOF
   if [ $? -eq 0 ]; then
-    pass "--local-ranks 2 --filter-category synthetic: flag reaches both workers, reconciliation unchanged"
+    pass "-n 2 --filter-category synthetic: flag reaches both workers, reconciliation unchanged"
   else
     fail "2-rank --filter-category forwarding" "$(cat "$TMP/o_out.txt")"
     cat "$LOG_O"
@@ -971,7 +981,7 @@ fi
 # the reporter used to keep every --filter/--kind-selected test, so each
 # MUST_PASS test that --filter-class kept from running was reported as "no
 # result produced by any rank (structural failure)". Single-node --filter-class
-# na must report only syn_na and pass; --local-ranks 2 --filter 'syn2_*'
+# na must report only syn_na and pass; -n 2 --filter 'syn2_*'
 # --filter-class na must report nothing and pass; both must be filtered=true.
 # ===========================================================================
 REP_P1="$TMP/rep_fc_na.json"
@@ -981,7 +991,7 @@ run_bin "$LOG_P1" --filter-class na \
 RC_P1=$RC
 REP_P2="$TMP/rep2_fc_na.json"
 LOG_P2="$TMP/twonode_fc_na.log"
-run_bin "$LOG_P2" --local-ranks 2 --filter 'syn2_*' --filter-class na \
+run_bin "$LOG_P2" -n 2 --filter 'syn2_*' --filter-class na \
         --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_P2"
 RC_P2=$RC
 
@@ -993,7 +1003,7 @@ else
 import json, sys
 errs = []
 for path, rc, want, label in ((sys.argv[1], int(sys.argv[2]), ["syn_na"], "single-node"),
-                              (sys.argv[3], int(sys.argv[4]), [], "--local-ranks 2")):
+                              (sys.argv[3], int(sys.argv[4]), [], "-n 2")):
     with open(path) as f:
         rep = json.load(f)
     ids = sorted(t["id"] for t in rep.get("tests", []))
@@ -1008,7 +1018,7 @@ if errs:
 sys.exit(0)
 PYEOF
   if [ $? -eq 0 ]; then
-    pass "--filter-class na: report holds only NA tests (single-node and --local-ranks 2), filtered=true, gate PASS"
+    pass "--filter-class na: report holds only NA tests (single-node and -n 2), filtered=true, gate PASS"
   else
     fail "--filter-class report selection" "$(cat "$TMP/p_out.txt")"
     cat "$LOG_P1" "$LOG_P2"
@@ -1017,23 +1027,23 @@ fi
 
 # ===========================================================================
 # Check (q): worker deadline watchdog. syn2_hang (ACCEPT_SYN_HANG=1)
-# makes both --local-ranks workers spin forever in-process (a TwoNode test
+# makes both -n 2 workers spin forever in-process (a TwoNode test
 # has no per-test timeout, see Runner::run_in_process). --launch-timeout 3
 # gives each worker --deadline-sec 13 (launch_timeout+10); its own watchdog
-# thread must SIGKILL the worker's process group well before the launcher's
-# own 90s overall-wait bound, so the launcher observes an abnormal child exit
+# thread must SIGKILL the worker's process group. The launcher's own deadline
+# (3s) is still the first to fire here; either way the launcher observes an abnormal child exit
 # and returns 4. Bounded with `timeout` so a regression here fails the check
 # instead of hanging the whole selftest; the pgrep below is scoped to THIS
 # worktree's binary path (not a bare 'hva --worker') because other agents run
 # their own hva builds concurrently on this host.
 # ===========================================================================
 LOG_Q="$TMP/hang.log"
-timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang \
+timeout 30 env ACCEPT_SYN_HANG=1 "$BIN" -n 2 --filter syn2_hang \
     --launch-timeout 3 --vendor synthetic --policy "$POLICY/synthetic.csv" \
     >"$LOG_Q" 2>&1
 RC_Q=$?
 
-# Scoped stray-process check. do_local_ranks execv's "/proc/self/exe" with
+# Scoped stray-process check. The launcher execv's local ranks as "/proc/self/exe" with
 # that LITERAL string as argv[0] (so the worker's cmdline does NOT contain
 # $BIN's path -- `pgrep -f "$BIN --worker"` would never match). Instead:
 # shortlist candidates with a plain '--worker' cmdline match, then keep only
@@ -1083,7 +1093,7 @@ fi
 # Check (r): SIGTERM to a launcher-spawned worker also kills its active
 # isolated test. syn_spawn_grandchild_hang runs isolated, in its own process
 # group, and forks a grandchild that writes its pid to ACCEPT_GC_PIDFILE. Once
-# that file exists, SIGTERM the worker (what --local-ranks sends on Ctrl-C).
+# that file exists, SIGTERM the worker (what the launcher sends on Ctrl-C).
 # The worker, its isolated child and the grandchild must all be gone; before
 # the fix the child's group outlived the worker. --deadline-sec 60 arms the
 # worker's handlers without the deadline firing during the check. The
@@ -1123,12 +1133,12 @@ else
 fi
 
 # ===========================================================================
-# Check (s): Ctrl-C on a --local-ranks launcher takes its workers down. Both
+# Check (s): Ctrl-C on an -n 2 launcher takes its workers down. Both
 # workers hang in syn2_hang, in their own process groups (outside the
 # terminal's foreground group), so only the launcher's handler can reach
 # them. SIGINT the launcher once both workers exist; all three must be gone.
 # ===========================================================================
-ACCEPT_SYN_HANG=1 "$BIN" --local-ranks 2 --filter syn2_hang --vendor synthetic \
+ACCEPT_SYN_HANG=1 "$BIN" -n 2 --filter syn2_hang --vendor synthetic \
     --policy "$POLICY/synthetic.csv" >"$TMP/s.log" 2>&1 &
 S_LAUNCHER=$!
 S_WORKERS=""
@@ -1147,14 +1157,14 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.2
 done
 if [ "$(echo "$S_WORKERS" | wc -w)" -ne 2 ]; then
-  fail "--local-ranks Ctrl-C cleanup" "setup: workers '$S_WORKERS' not seen"
+  fail "-n 2 Ctrl-C cleanup" "setup: workers '$S_WORKERS' not seen"
   cat "$TMP/s.log"
   [ -n "$S_WORKERS" ] && kill -9 $S_WORKERS 2>/dev/null
 elif [ -n "$S_ALIVE" ]; then
-  fail "--local-ranks Ctrl-C cleanup" "workers still alive after SIGINT:$S_ALIVE"
+  fail "-n 2 Ctrl-C cleanup" "workers still alive after SIGINT:$S_ALIVE"
   kill -9 $S_ALIVE 2>/dev/null
 else
-  pass "--local-ranks Ctrl-C cleanup (workers $S_WORKERS are gone)"
+  pass "-n 2 Ctrl-C cleanup (workers $S_WORKERS are gone)"
 fi
 
 # ===========================================================================
@@ -1184,6 +1194,215 @@ if [ "$RC_T" -eq 124 ] || [ "$T_ELAPSED" -gt 5 ]; then
        "exit=$RC_T after ${T_ELAPSED}s (watchdog blocked on stderr?)"
 else
   pass "deadline kill with stalled stderr (exit $RC_T after ${T_ELAPSED}s)"
+fi
+
+# ===========================================================================
+# Check (u): -n / -ppn / -hosts validation and the removed flags all exit 2,
+# before anything is launched: -n 0 (at least 1 rank), -n 2 -ppn 1 on one
+# host (does not fit), a duplicate host, two hosts without -n (it would
+# quietly run one rank), and the old --local-ranks / --nodes flags.
+# ===========================================================================
+U_FAILS=""
+u_expect2() {
+  local label="$1"; shift
+  local out
+  out=$("$BIN" "$@" --vendor synthetic --policy "$POLICY/synthetic.csv" \
+        --report "$TMP/rep_u.json" 2>&1 >/dev/null)
+  local rc=$?
+  [ "$rc" -eq 2 ] || U_FAILS="$U_FAILS
+$label: exit=$rc (want 2): $out"
+}
+u_expect2 "-n 0"               -n 0
+u_expect2 "-n 2 -ppn 1"        -n 2 -ppn 1
+u_expect2 "duplicate host"     -n 2 -ppn 1 -hosts nosuch.invalid,nosuch.invalid
+u_expect2 "2 hosts without -n" -hosts nosuch1.invalid,nosuch2.invalid
+u_expect2 "--local-ranks"      --local-ranks 2
+u_expect2 "--nodes"            --nodes nosuch1.invalid,nosuch2.invalid
+if [ -n "$U_FAILS" ]; then
+  fail "launch validation" "$U_FAILS"
+elif [ -f "$TMP/rep_u.json" ]; then
+  fail "launch validation" "a rejected invocation wrote a report"
+else
+  pass "launch validation (-n 0 / does-not-fit / duplicate host / 2 hosts without -n / removed --local-ranks and --nodes) all exit 2"
+fi
+
+# ===========================================================================
+# Check (v): one local rank and one remote rank in the same run. -hosts
+# 127.0.0.1,127.0.0.2 puts rank 0 on this host (fork/exec) and rank 1 on
+# "another" host, started through the fake srun from check (l). Rank 0's
+# rendezvous is then advertised under this machine's hostname, so the check is
+# skipped when that name does not resolve to an IPv4 address this host owns
+# (a stale DNS record would send rank 1 to another machine).
+# ===========================================================================
+if ! "$PY" -c '
+import socket
+s = socket.socket()
+s.bind((socket.gethostbyname(socket.gethostname()), 0))' >/dev/null 2>&1; then
+  pass "mixed local + srun ranks (SKIPPED: hostname '$(hostname)' does not resolve to this host)"
+else
+  REP_V="$TMP/rep_mixed.json"
+  LOG_V="$TMP/mixed.log"
+  PATH="$FAKEBIN:$PATH" SLURM_JOB_ID=999999 \
+    run_bin "$LOG_V" -n 2 -ppn 1 -hosts 127.0.0.1,127.0.0.2 --remote-launcher srun \
+            --filter 'syn2_barrier' --vendor synthetic --policy "$POLICY/synthetic.csv" \
+            --report "$REP_V"
+  RC_V=$RC
+  if ! grep -q 'rank 0 on 127.0.0.1 (local), rank 1 on 127.0.0.2 (srun)' "$LOG_V"; then
+    fail "mixed local + srun ranks" "launch line did not show one local and one srun rank"
+    cat "$LOG_V"
+  elif [ "$RC_V" -ne 0 ] || [ ! -f "$REP_V" ]; then
+    fail "mixed local + srun ranks" "exit=$RC_V (want 0, syn2_barrier passes)"
+    cat "$LOG_V"
+  elif ! "$PY" -c '
+import json, sys
+rep = json.load(open(sys.argv[1]))
+t = {t["id"]: t for t in rep["tests"]}.get("syn2_barrier", {})
+ok = (t.get("status") == "pass" and
+      rep.get("launch") == {"np": 2, "ppn": 1, "hosts": ["127.0.0.1", "127.0.0.2"]})
+sys.exit(0 if ok else 1)' "$REP_V"; then
+    fail "mixed local + srun ranks" "syn2_barrier not pass or launch{} wrong in $REP_V"
+    cat "$LOG_V"
+  else
+    pass "mixed local + srun ranks (rank 0 local, rank 1 via srun, syn2_barrier pass, launch{} recorded)"
+  fi
+fi
+
+# ===========================================================================
+# Check (w): GPU / HCA selection on the fake env (GPUs 0-3 nearest bnxt_re0,
+# GPUs 4-7 nearest bnxt_re1). -n 2 --device 0,4 gives each local rank its own
+# GPU and, by affinity, its own NIC; --hca alone picks the nearest GPU; a
+# non-nearest pair runs with a note; each rank prints a "topology:" header.
+# A NIC name in --device, a list that is neither 1 nor -ppn entries long, and
+# a --device / --hca this host does not have are errors (exit 2).
+# ===========================================================================
+REP_W="$TMP/rep_sel.json"
+LOG_W="$TMP/sel.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W" -n 2 --device 0,4 --filter 'syn2_barrier' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_W"
+RC_W1=$RC
+REP_W2="$TMP/rep_sel_hca.json"
+LOG_W2="$TMP/sel_hca.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W2" --hca bnxt_re1 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_W2"
+RC_W2=$RC
+LOG_W3="$TMP/sel_far.log"
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_W3" --hca bnxt_re1 --device 0 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$TMP/rep_sel_far.json"
+RC_W3=$RC
+run_bin "$TMP/sel_bad1.log" --device mlx5_0 --filter 'syn_pass'
+RC_W4=$RC
+run_bin "$TMP/sel_bad2.log" -n 2 --hca a,b,c --filter 'syn2_barrier'
+RC_W5=$RC
+ACCEPT_FAKE_ENV=1 run_bin "$TMP/sel_bad3.log" --device 9 --hca mlx5_9 --filter 'syn_pass' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$TMP/rep_sel_bad3.json"
+RC_W6=$RC
+
+if [ "$RC_W1" -ne 0 ] || [ "$RC_W2" -ne 0 ] || [ "$RC_W3" -ne 0 ]; then
+  fail "GPU/HCA selection" "exit codes $RC_W1/$RC_W2/$RC_W3 (want 0/0/0)"
+  cat "$LOG_W" "$LOG_W2" "$LOG_W3"
+elif [ "$RC_W4" -ne 2 ] || ! grep -q 'use --hca for the RDMA device' "$TMP/sel_bad1.log"; then
+  fail "GPU/HCA selection" "--device mlx5_0: exit $RC_W4 (want 2 with a --hca hint)"
+  cat "$TMP/sel_bad1.log"
+elif [ "$RC_W5" -ne 2 ] || ! grep -q -- '--hca lists 3 entries' "$TMP/sel_bad2.log"; then
+  fail "GPU/HCA selection" "-n 2 --hca a,b,c: exit $RC_W5 (want 2)"
+  cat "$TMP/sel_bad2.log"
+elif [ "$RC_W6" -ne 2 ] || [ -f "$TMP/rep_sel_bad3.json" ] ||
+     ! grep -q '^error: GPU 9 is not visible on this host; HCA mlx5_9 is not present on this host$' \
+       "$TMP/sel_bad3.log"; then
+  fail "GPU/HCA selection" "--device 9 --hca mlx5_9: exit $RC_W6 (want 2, no report)"
+  cat "$TMP/sel_bad3.log"
+elif ! grep -q 'note: HCA bnxt_re1 is not the nearest NIC to GPU 0 (nearest: bnxt_re0)' "$LOG_W3"; then
+  fail "GPU/HCA selection" "--hca bnxt_re1 --device 0 printed no note"
+  cat "$LOG_W3"
+elif ! grep -q '^topology: rank 1 on [^:]*: GPU 4 (user), HCA bnxt_re1 (affinity)$' "$LOG_W" ||
+     ! grep -q '^topology: GPU 4 (affinity), HCA bnxt_re1 (user)$' "$LOG_W2"; then
+  fail "GPU/HCA selection" "missing or wrong 'topology:' header"
+  cat "$LOG_W" "$LOG_W2"
+elif ! "$PY" - "$REP_W" "$REP_W2" <<'PYEOF' >"$TMP/w_out.txt" 2>&1
+import json, sys
+errs = []
+def sel(path):
+    return [n.get("topology") for n in json.load(open(path)).get("nodes", [])]
+want = [{"hca": "bnxt_re0", "gpu": 0, "hca_source": "affinity",
+         "gpu_source": "user", "local": True, "note": None},
+        {"hca": "bnxt_re1", "gpu": 4, "hca_source": "affinity",
+         "gpu_source": "user", "local": True, "note": None}]
+if sel(sys.argv[1]) != want:
+    errs.append("-n 2 --device 0,4: %r" % sel(sys.argv[1]))
+want = [{"hca": "bnxt_re1", "gpu": 4, "hca_source": "user",
+         "gpu_source": "affinity", "local": True, "note": None}]
+if sel(sys.argv[2]) != want:
+    errs.append("--hca bnxt_re1: %r" % sel(sys.argv[2]))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+PYEOF
+then
+  fail "GPU/HCA selection" "$(cat "$TMP/w_out.txt")"
+else
+  pass "GPU/HCA selection (-n 2 --device 0,4 -> bnxt_re0/bnxt_re1, --hca bnxt_re1 -> GPU 4, far pair noted, headers printed, bad --device / list length / missing GPU+HCA exit 2)"
+fi
+
+# ===========================================================================
+# Check (x): more than 2 ranks. -n 3 on one host runs the single-rank tests on
+# every rank, each on its own GPU (= local rank), and leaves the two-rank tests
+# out with a note.
+# ===========================================================================
+REP_X="$TMP/rep_n3.json"
+LOG_X="$TMP/n3.log"
+# The glob selects exactly syn_pass and syn2_barrier.
+ACCEPT_FAKE_ENV=1 run_bin "$LOG_X" -n 3 --filter 'syn[2_][_p][ba][as][sr]*' \
+    --vendor synthetic --policy "$POLICY/synthetic.csv" --report "$REP_X"
+RC_X=$RC
+if [ "$RC_X" -ne 0 ] || [ ! -f "$REP_X" ]; then
+  fail "-n 3" "exit=$RC_X (want 0)"
+  cat "$LOG_X"
+elif ! grep -q '^note: 1 two-rank test(s) not run: they need -n 2$' "$LOG_X"; then
+  fail "-n 3" "no note about the two-rank test left out"
+  cat "$LOG_X"
+elif ! "$PY" -c '
+import json, sys
+rep = json.load(open(sys.argv[1]))
+ok = ([(t["id"], t["status"]) for t in rep["tests"]] == [("syn_pass", "pass")] and
+      [n["topology"]["gpu"] for n in rep["nodes"]] == [0, 1, 2] and
+      rep.get("launch") == {"np": 3, "ppn": 3, "hosts": ["localhost"]})
+sys.exit(0 if ok else 1)' "$REP_X"; then
+  fail "-n 3" "want syn_pass only, GPUs 0/1/2, launch np 3 in $REP_X"
+  cat "$LOG_X"
+else
+  pass "-n 3 (syn_pass on 3 ranks / GPUs 0-2, syn2_barrier left out with a note)"
+fi
+
+# ===========================================================================
+# Check (y): a host given as one of this machine's interface addresses is
+# local. With -hosts 127.0.0.1,<this host's IP> and an ssh that always fails,
+# the run only passes if both ranks are fork/exec'd here. The IP is the source
+# address of the default route (a UDP connect sends nothing); skipped without
+# one.
+# ===========================================================================
+SELF_IP=$("$PY" -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("192.0.2.1", 9))
+print(s.getsockname()[0])' 2>/dev/null)
+if [ -z "$SELF_IP" ] || [ "${SELF_IP#127.}" != "$SELF_IP" ]; then
+  pass "host by address is local (SKIPPED: no default-route address)"
+else
+  LOG_Y="$TMP/self_ip.log"
+  NOSSH="$TMP/nossh"
+  mkdir -p "$NOSSH"
+  printf '#!/bin/sh\necho "fake ssh: should not be called" >&2\nexit 255\n' >"$NOSSH/ssh"
+  chmod +x "$NOSSH/ssh"
+  PATH="$NOSSH:$PATH" run_bin "$LOG_Y" -n 2 -ppn 1 -hosts "127.0.0.1,$SELF_IP" \
+      --filter 'syn2_barrier' --vendor synthetic --policy "$POLICY/synthetic.csv" \
+      --report "$TMP/rep_self_ip.json"
+  RC_Y=$RC
+  if [ "$RC_Y" -ne 0 ] ||
+     ! grep -q "rank 0 on 127.0.0.1 (local), rank 1 on $SELF_IP (local)" "$LOG_Y"; then
+    fail "host by address is local" "exit=$RC_Y; want both ranks local"
+    cat "$LOG_Y"
+  else
+    pass "host by address is local (-hosts 127.0.0.1,$SELF_IP: both ranks fork/exec'd)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

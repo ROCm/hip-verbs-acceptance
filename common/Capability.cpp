@@ -14,6 +14,7 @@
 #include "common/Capability.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -278,26 +279,14 @@ std::string kfd_prop(const std::string& props, const std::string& key) {
   return std::string();
 }
 
-// Resolve a KFD topology node's PCIe BDF from its `location_id` property.
-// location_id is a hex-encoded BDF: upper 16 bits = domain, bits 8-15 = bus,
-// bits 3-7 = device, bits 0-2 = function. Format: DDDD:BB:dd.f
-// Fallback: read the "device" symlink target's last component (older kernels).
+// Resolve a KFD topology node's PCIe BDF from its `location_id` and `domain`
+// properties (see topology::parse_kfd_bdf). Fallback: read the "device" symlink
+// target's last component.
 std::string kfd_node_bdf(const std::string& node_path,
                          const std::string& props) {
-  const std::string loc_str = kfd_prop(props, "location_id");
-  if (!loc_str.empty()) {
-    try {
-      const unsigned long loc = std::stoul(loc_str, nullptr, 16);
-      const unsigned domain = (loc >> 16) & 0xFFFF;
-      const unsigned bus    = (loc >>  8) & 0xFF;
-      const unsigned dev    = (loc >>  3) & 0x1F;
-      const unsigned func   = (loc >>  0) & 0x07;
-      char buf[32];
-      std::snprintf(buf, sizeof(buf), "%04x:%02x:%02x.%x",
-                    domain, bus, dev, func);
-      return buf;
-    } catch (...) {}
-  }
+  const std::string bdf = topology::parse_kfd_bdf(kfd_prop(props, "location_id"),
+                                           kfd_prop(props, "domain"));
+  if (!bdf.empty()) return bdf;
   // Fallback: readlink .../device -> .../pci/devices/<bdf>
   char buf[512];
   const std::string link = node_path + "/device";
@@ -339,6 +328,7 @@ int detect_gpu_devices(std::vector<GpuDevice>& out) {
     ++gpus;
     GpuDevice g;
     g.ordinal = ordinal++;
+    g.hip_ordinal = g.ordinal;  // enrich_hip() remaps when HIP is loaded
     g.bdf = kfd_node_bdf(node_path, props);
     g.numa_node = bdf_numa_node(g.bdf);
     // Best-effort arch from gfx_target_version (decimal, format:
@@ -373,58 +363,6 @@ int detect_gpu_devices(std::vector<GpuDevice>& out) {
   }
   if (parsed > 0) return gpus;
   return static_cast<int>(nodes.size());
-}
-
-// Compute GPU↔NIC affinity: for each GPU, find the RDMA device whose PCIe BDF
-// shares the longest prefix with the GPU's BDF (same PCIe root → lowest hop
-// count). BDFs are "domain:bus:dev.func"; we compare the "domain:bus" prefix so
-// devices on the same bus score highest. Falls back to bnxt_re0/mlx5_0/etc.
-std::vector<GpuNicAffinity> compute_affinity(
-    const std::vector<GpuDevice>& gpus,
-    const std::vector<RdmaDevice>& nics) {
-  if (gpus.empty() || nics.empty()) return {};
-
-  // Build NIC BDF table: read /sys/class/infiniband/<dev>/device -> BDF.
-  auto nic_bdf = [](const std::string& dev) -> std::string {
-    char buf[512];
-    const std::string link =
-        "/sys/class/infiniband/" + dev + "/device";
-    const ssize_t n = ::readlink(link.c_str(), buf, sizeof(buf) - 1);
-    if (n <= 0) return std::string();
-    buf[n] = '\0';
-    const std::string t(buf);
-    const std::size_t s = t.rfind('/');
-    return (s == std::string::npos) ? t : t.substr(s + 1);
-  };
-
-  struct NicEntry { std::string dev; std::string bdf; };
-  std::vector<NicEntry> nic_entries;
-  for (const auto& nic : nics) {
-    nic_entries.push_back({nic.device, nic_bdf(nic.device)});
-  }
-
-  // Common-prefix length of two BDF strings (domain:bus share = high affinity).
-  auto common_prefix = [](const std::string& a, const std::string& b) -> std::size_t {
-    std::size_t n = std::min(a.size(), b.size()), i = 0;
-    while (i < n && a[i] == b[i]) ++i;
-    return i;
-  };
-
-  std::vector<GpuNicAffinity> result;
-  for (const auto& gpu : gpus) {
-    GpuNicAffinity aff;
-    aff.gpu_ordinal = gpu.ordinal;
-    std::size_t best = 0;
-    for (const auto& ne : nic_entries) {
-      const std::size_t score = common_prefix(gpu.bdf, ne.bdf);
-      if (score > best || aff.nearest_nic.empty()) {
-        best = score;
-        aff.nearest_nic = ne.dev;
-      }
-    }
-    result.push_back(std::move(aff));
-  }
-  return result;
 }
 
 // Manual GID-index override: ACCEPT_IB_GID_INDEX (set from --gid). >=0 forces
@@ -633,10 +571,11 @@ void enrich_ibverbs(EnvironmentInfo& env) {
 #endif
 }
 
-// HIP: record gpu_model only (ACCEPT_HAVE_HIP; no-op otherwise). Queries device 0
-// properties — no kernel launch/alloc. driver_version is NOT set here: the HIP
-// runtime version duplicates rocm_version and is not the KMD driver; detect()
-// reads the amdgpu KMD version from sysfs (dep-free) instead.
+// HIP: record gpu_model and each GPU's HIP ordinal (ACCEPT_HAVE_HIP; no-op
+// otherwise). Queries device properties and PCI bus ids — no kernel
+// launch/alloc. driver_version is NOT set here: the HIP runtime version
+// duplicates rocm_version and is not the KMD driver; detect() reads the amdgpu
+// KMD version from sysfs (dep-free) instead.
 void enrich_hip(EnvironmentInfo& env) {
 #ifdef ACCEPT_HAVE_HIP
   // HIP entry points resolve at run time through the dlopen wrapper; if the HIP
@@ -657,6 +596,35 @@ void enrich_hip(EnvironmentInfo& env) {
     }
   } catch (const ::acceptance::hipw::MissingSymbol&) {
     // Leave gpu_model unset; best-effort enrichment only.
+  }
+  // HIP ordinals are relative to HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES;
+  // match them to the KFD GPUs by PCI BDF. Remap only when at least one GPU
+  // matches, so a KFD walk without BDFs keeps the KFD ordinals.
+  try {
+    auto lower = [](std::string s) {
+      for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      return s;
+    };
+    int count = 0;
+    if (hipGetDeviceCount(&count) != hipSuccess) count = 0;
+    std::vector<int> hip_of(env.gpu_devices.size(), -1);
+    bool any = false;
+    for (int h = 0; h < count; ++h) {
+      char bus[64] = {};
+      if (hipDeviceGetPCIBusId(bus, sizeof(bus), h) != hipSuccess) continue;
+      const std::string b = lower(bus);
+      for (std::size_t i = 0; i < env.gpu_devices.size(); ++i) {
+        if (!env.gpu_devices[i].bdf.empty() && lower(env.gpu_devices[i].bdf) == b) {
+          hip_of[i] = h;
+          any = true;
+        }
+      }
+    }
+    if (any)
+      for (std::size_t i = 0; i < env.gpu_devices.size(); ++i)
+        env.gpu_devices[i].hip_ordinal = hip_of[i];
+  } catch (const ::acceptance::hipw::MissingSymbol&) {
+    // Keep the KFD ordinals.
   }
 #else
   (void)env;
@@ -777,17 +745,34 @@ EnvironmentInfo fake_env() {
   // with a full stack would (dmabuf MR registration + GPU stream wait-on-value).
   env.symbols["ibv_reg_dmabuf_mr"] = true;
   env.symbols["hipStreamWaitValue64"] = true;
-  // gpu_devices/gpu_nic_affinity left empty: the NIC device already exercises the
-  // serialize→parse→report flow this seam exists for.
-  RdmaDevice d;
-  d.device = "bnxt_re0";
-  d.netdev = "eth0";
-  d.fw_ver = "0.0.0";
-  d.board_id = "FAKE0000";
-  d.node_guid = "0000:0000:0000:0000";
-  d.gid_index = 3;
-  d.gid_type = "RoCE v2";
-  env.rdma_devices.push_back(d);
+  // Two NICs and eight GPUs, GPUs 0-3 nearest bnxt_re0 and 4-7 nearest
+  // bnxt_re1, so --hca / --device selection can be exercised without hardware.
+  for (int i = 0; i < 2; ++i) {
+    RdmaDevice d;
+    d.device = "bnxt_re" + std::to_string(i);
+    d.netdev = "eth" + std::to_string(i);
+    d.fw_ver = "0.0.0";
+    d.board_id = "FAKE0000";
+    char guid[32];
+    std::snprintf(guid, sizeof(guid), "0000:0000:0000:%04x", i);
+    d.node_guid = guid;
+    d.gid_index = 3;
+    d.gid_type = "RoCE v2";
+    d.port_state = "ACTIVE";
+    env.rdma_devices.push_back(d);
+  }
+  for (int i = 0; i < env.gpu_count; ++i) {
+    GpuDevice g;
+    g.ordinal = i;
+    g.hip_ordinal = i;
+    char bdf[32];
+    std::snprintf(bdf, sizeof(bdf), "0000:%02x:00.0", i);
+    g.bdf = bdf;
+    g.numa_node = i < 4 ? 0 : 1;
+    g.arch = "gfx-fake";
+    env.gpu_devices.push_back(g);
+    env.gpu_nic_affinity.push_back({i, i < 4 ? "bnxt_re0" : "bnxt_re1", false});
+  }
   return env;
 }
 
@@ -813,10 +798,10 @@ std::optional<std::string> find_info_version(const std::string& start_dir,
   return std::nullopt;
 }
 
-EnvironmentInfo detect() {
-  // TEST SEAM (checked FIRST): deterministic descriptor, no hardware reads.
-  if (std::getenv("ACCEPT_FAKE_ENV") != nullptr) return fake_env();
+namespace {
 
+// The hardware probe behind detect().
+EnvironmentInfo probe_env() {
   EnvironmentInfo env;
 
   // --- RDMA device enumeration -------------------------------------------
@@ -833,23 +818,14 @@ EnvironmentInfo detect() {
     const std::vector<std::string> nets = list_dir(dev_path + "/device/net");
     if (!nets.empty()) d.netdev = nets.front();
     select_gid(dev_path, d);
-    env.rdma_devices.push_back(std::move(d));
-  }
-
-  // Manual device override: ACCEPT_IB_DEVICE (set from --device) moves the named
-  // device to the front so vendor detection, GID selection, and "first device"
-  // pickers prefer it (mirrors RCCL's NCCL_IB_HCA). No-op if unset or not found.
-  if (const char* want = std::getenv("ACCEPT_IB_DEVICE");
-      want != nullptr && *want != '\0') {
-    const std::string target = want;
-    for (std::size_t i = 0; i < env.rdma_devices.size(); ++i) {
-      if (env.rdma_devices[i].device == target) {
-        if (i != 0) std::rotate(env.rdma_devices.begin(),
-                                env.rdma_devices.begin() + i,
-                                env.rdma_devices.begin() + i + 1);
-        break;
-      }
+    // First port's state, "4: ACTIVE" -> "ACTIVE".
+    if (const std::vector<std::string> ports = list_dir(dev_path + "/ports");
+        !ports.empty()) {
+      const std::string st = read_attr(dev_path + "/ports/" + ports.front() + "/state");
+      const std::size_t colon = st.find(": ");
+      d.port_state = colon == std::string::npos ? st : st.substr(colon + 2);
     }
+    env.rdma_devices.push_back(std::move(d));
   }
 
   // Vendor/prefix come from the FIRST device's name; no devices -> unknown.
@@ -863,8 +839,8 @@ EnvironmentInfo detect() {
   // --- GPU devices + count (KFD topology, dep-free sysfs) -------------------
   env.gpu_count = detect_gpu_devices(env.gpu_devices);
 
-  // --- GPU↔NIC affinity (nearest PCIe BDF prefix) -------------------------
-  env.gpu_nic_affinity = compute_affinity(env.gpu_devices, env.rdma_devices);
+  // --- GPU↔NIC affinity (deepest shared PCIe ancestor) --------------------
+  env.gpu_nic_affinity = topology::compute_affinity(env.gpu_devices, env.rdma_devices);
 
   // --- kernel (uname) ----------------------------------------------------
   struct utsname uts;
@@ -891,6 +867,31 @@ EnvironmentInfo detect() {
 
   return env;
 }
+
+}  // namespace
+
+EnvironmentInfo detect() {
+  // TEST SEAM (checked FIRST): deterministic descriptor, no hardware reads.
+  EnvironmentInfo env =
+      std::getenv("ACCEPT_FAKE_ENV") != nullptr ? fake_env() : probe_env();
+
+  // This rank's GPU/HCA pair (--hca / --device / local rank; see
+  // Topology.hpp). The HCA moves to the front so vendor detection, the GID and
+  // "first device" readers describe the NIC actually used (mirrors RCCL's
+  // NCCL_IB_HCA).
+  env.rank_pair = topology::get_rank_pair(env);
+  for (std::size_t i = 1; i < env.rdma_devices.size(); ++i) {
+    if (env.rdma_devices[i].device == env.rank_pair.hca) {
+      std::rotate(env.rdma_devices.begin(), env.rdma_devices.begin() + i,
+                  env.rdma_devices.begin() + i + 1);
+      vendor_from_device(env.rdma_devices.front().device, env.vendor,
+                         env.rdma_prefix);
+      break;
+    }
+  }
+  return env;
+}
+
 
 const EnvironmentInfo& environment() {
   static const EnvironmentInfo env = detect();
@@ -923,6 +924,7 @@ std::string EnvironmentInfo::to_kv() const {
     out << p << "node_guid=" << kv_safe(d.node_guid) << "\n";
     out << p << "gid_index=" << TestResult::int_to_chars(d.gid_index) << "\n";
     out << p << "gid_type=" << kv_safe(d.gid_type) << "\n";
+    out << p << "port_state=" << kv_safe(d.port_state) << "\n";
     out << p << "vendor_id=" << TestResult::int_to_chars(d.vendor_id) << "\n";
     out << p << "vendor_part_id=" << TestResult::int_to_chars(d.vendor_part_id)
         << "\n";
@@ -931,6 +933,7 @@ std::string EnvironmentInfo::to_kv() const {
     const GpuDevice& g = gpu_devices[i];
     const std::string p = "gpu." + std::to_string(i) + ".";
     out << p << "ordinal=" << TestResult::int_to_chars(g.ordinal) << "\n";
+    out << p << "hip_ordinal=" << TestResult::int_to_chars(g.hip_ordinal) << "\n";
     out << p << "bdf=" << kv_safe(g.bdf) << "\n";
     out << p << "numa_node=" << TestResult::int_to_chars(g.numa_node) << "\n";
     out << p << "arch=" << kv_safe(g.arch) << "\n";
@@ -940,7 +943,14 @@ std::string EnvironmentInfo::to_kv() const {
     const std::string p = "affinity." + std::to_string(i) + ".";
     out << p << "gpu_ordinal=" << TestResult::int_to_chars(a.gpu_ordinal) << "\n";
     out << p << "nearest_nic=" << kv_safe(a.nearest_nic) << "\n";
+    out << p << "ambiguous=" << (a.ambiguous ? "true" : "false") << "\n";
   }
+  out << "pair.hca=" << kv_safe(rank_pair.hca) << "\n";
+  out << "pair.gpu=" << TestResult::int_to_chars(rank_pair.gpu) << "\n";
+  out << "pair.hca_source=" << kv_safe(rank_pair.hca_source) << "\n";
+  out << "pair.gpu_source=" << kv_safe(rank_pair.gpu_source) << "\n";
+  out << "pair.local=" << (rank_pair.local ? "true" : "false") << "\n";
+  out << "pair.note=" << kv_safe(rank_pair.note) << "\n";
   return out.str();
 }
 
@@ -982,6 +992,12 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
     else if (key == "os")           env.os = val;
     else if (key == "gpu_model")    env.gpu_model = val;
     else if (key == "driver_version") env.driver_version = val;
+    else if (key == "pair.hca")        env.rank_pair.hca = val;
+    else if (key == "pair.gpu")        env.rank_pair.gpu = to_int(val, 0);
+    else if (key == "pair.hca_source") env.rank_pair.hca_source = val;
+    else if (key == "pair.gpu_source") env.rank_pair.gpu_source = val;
+    else if (key == "pair.local")      env.rank_pair.local = (val == "true");
+    else if (key == "pair.note")       env.rank_pair.note = val;
     else if (key.compare(0, 4, "sym.") == 0) {
       // sym.<name>=true|false
       const std::string name = key.substr(4);
@@ -1000,6 +1016,7 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
       const std::string field = key.substr(dot + 1);
       GpuDevice& g = gpumap[idx];
       if (field == "ordinal")        g.ordinal = to_int(val, 0);
+      else if (field == "hip_ordinal") g.hip_ordinal = to_int(val, -1);
       else if (field == "bdf")       g.bdf = val;
       else if (field == "numa_node") g.numa_node = to_int(val, -1);
       else if (field == "arch")      g.arch = val;
@@ -1018,6 +1035,7 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
       GpuNicAffinity& a = affmap[idx];
       if (field == "gpu_ordinal")      a.gpu_ordinal = to_int(val, 0);
       else if (field == "nearest_nic") a.nearest_nic = val;
+      else if (field == "ambiguous")   a.ambiguous = (val == "true");
     }
     else if (key.compare(0, 5, "rdma.") == 0) {
       // rdma.<i>.<field>
@@ -1041,6 +1059,7 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
       else if (field == "node_guid") d.node_guid = val;
       else if (field == "gid_index") d.gid_index = to_int(val, -1);
       else if (field == "gid_type")  d.gid_type = val;
+      else if (field == "port_state") d.port_state = val;
       else if (field == "vendor_id") d.vendor_id = to_int(val, -1);
       else if (field == "vendor_part_id") d.vendor_part_id = to_int(val, -1);
       // unknown rdma fields ignored

@@ -12,7 +12,7 @@ assignees: ""
 
 ## Reproduction
 
-- Command line (filters, `--kind`, `--nodes`/`--local-ranks`):
+- Command line (filters, `--kind`, `-n`/`-ppn`/`-hosts`, `--hca`/`--device`):
 - Build flags (`ACCEPT_WITH_HIP`, `ACCEPT_WITH_IBVERBS`):
 
 ```bash
