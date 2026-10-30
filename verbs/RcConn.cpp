@@ -59,7 +59,8 @@ RcConn::~RcConn() {
   ibvw::safe_close_device(ctx_);
 }
 
-std::string RcConn::open(const std::string& dev_name, bool& no_device) {
+std::string RcConn::open(const std::string& dev_name, bool& no_device,
+                         uint32_t max_inline) {
   no_device = false;
   // Empty dev_name means "auto-select": open this rank's selected HCA
   // (ACCEPT_HCA, see Topology.hpp) -- the device the environment report and
@@ -156,11 +157,29 @@ std::string RcConn::open(const std::string& dev_name, bool& no_device) {
   qia.cap.max_recv_wr = 16;
   qia.cap.max_send_sge = 1;
   qia.cap.max_recv_sge = 1;
-  // max_inline_data=0 matches RCCL's default (NCCL_IB_USE_INLINE=0).
-  // Most providers grant a small non-zero amount anyway (minimum WQE size).
-  qia.cap.max_inline_data = 0;
+  // The default max_inline_data=0 matches RCCL's default (NCCL_IB_USE_INLINE=0).
+  // Providers differ in what they grant: ionic rounds 0 up to 24 (minimum WQE
+  // size), bnxt_re grants exactly what was asked. If a non-zero request is
+  // rejected, retry with 0 so the caller can skip on max_inline() instead.
+  // Intentional: the retry differs only in max_inline_data, so any other
+  // create fault fails it too and still surfaces as "ibv_create_qp failed".
+  qia.cap.max_inline_data = max_inline;
   qp_ = ibv_create_qp(pd_, &qia);
+  if (qp_ == nullptr && max_inline > 0) {
+    qia.cap.max_inline_data = 0;
+    qp_ = ibv_create_qp(pd_, &qia);
+  }
   if (qp_ == nullptr) return errno_str("ibv_create_qp failed");
+  // ibv_create_qp(3) writes the granted caps back into qia, but prefer asking
+  // the QP itself in case a provider only reports them via ibv_query_qp. A
+  // failed query keeps the create-time value rather than failing every RC test.
+  max_inline_ = qia.cap.max_inline_data;
+  struct ibv_qp_attr cap_attr;
+  struct ibv_qp_init_attr cap_init;
+  std::memset(&cap_attr, 0, sizeof(cap_attr));
+  std::memset(&cap_init, 0, sizeof(cap_init));
+  if (ibv_query_qp(qp_, &cap_attr, IBV_QP_CAP, &cap_init) == 0)
+    max_inline_ = cap_attr.cap.max_inline_data;
 
   // Query device caps to gate optional features: don't request REMOTE_ATOMIC
   // on a NIC that advertises no atomic support (some drivers return EINVAL).
