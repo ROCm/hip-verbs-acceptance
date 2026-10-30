@@ -146,7 +146,10 @@ inline std::string check_requested_device(const std::string& opened) {
 // QpInfo over the bootstrap. On success `conn` is at RTS wired to the peer.
 // Returns "" on success (both ranks connected); otherwise a reason, with
 // *out_skip set when the collective decision was SKIP (no device / no peer).
-inline std::string connect_peer(TestContext& ctx, RcConn& conn, bool* out_skip) {
+// max_inline is passed to RcConn::open(); when non-zero, a rank whose provider
+// grants less than that skips (the caller's inline posts wouldn't fit).
+inline std::string connect_peer(TestContext& ctx, RcConn& conn, bool* out_skip,
+                                uint32_t max_inline = 0) {
   *out_skip = false;
   Bootstrap* boot = ctx.boot;
 
@@ -154,7 +157,7 @@ inline std::string connect_peer(TestContext& ctx, RcConn& conn, bool* out_skip) 
   Gate mine = G_OK;
   std::string reason;
   bool no_dev = false;
-  std::string e = conn.open("", no_dev);
+  std::string e = conn.open("", no_dev, max_inline);
   if (!e.empty()) {
     mine = no_dev ? G_SKIP : G_FAIL;
     reason = e;
@@ -165,6 +168,11 @@ inline std::string connect_peer(TestContext& ctx, RcConn& conn, bool* out_skip) 
              !dr.empty()) {
     mine = G_FAIL;
     reason = dr;
+  } else if (conn.max_inline() < max_inline) {
+    mine = G_SKIP;
+    reason = conn.dev_name() + " granted max_inline_data=" +
+             std::to_string(conn.max_inline()) + " < " +
+             std::to_string(max_inline);
   }
   if (Gate g = gate(boot, mine); g != G_OK) {
     *out_skip = (g == G_SKIP);

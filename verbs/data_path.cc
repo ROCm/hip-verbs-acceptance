@@ -265,17 +265,20 @@ ACCEPT_TEST(vat_rdma_write_chain, "verbs/datapath", Topology::TwoNode,
 }
 
 // Small RDMA_WRITE with IBV_SEND_INLINE across the wire (no source MR/lkey).
+// The QP must be created with max_inline_data >= kLen: posting more inline
+// bytes than granted is undefined (bnxt_re accepts the post and delivers
+// garbage; ionic happens to grant 24 even when asked for 0).
 ACCEPT_TEST(vat_inline_send, "verbs/datapath", Topology::TwoNode,
             Kind::Functional, 30) {
   if (ctx.size != 2 || ctx.boot == nullptr) return skip("needs 2 ranks");
   Bootstrap* boot = ctx.boot;
   const bool is_client = (ctx.rank == kClientRank);
+  constexpr size_t kLen = 24;
   verbsx::RcConn conn;
   bool skip_it = false;
-  std::string e = verbsx::connect_peer(ctx, conn, &skip_it);
+  std::string e = verbsx::connect_peer(ctx, conn, &skip_it, kLen);
   if (!e.empty()) return skip_it ? skip(e) : fail(e);
 
-  constexpr size_t kLen = 24;
   std::vector<uint8_t> buf(kLen);
   verbsx::ScopedMr mr(conn, buf.data(), kLen,
                       IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE,
