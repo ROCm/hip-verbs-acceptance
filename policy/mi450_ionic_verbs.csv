@@ -9,25 +9,23 @@ vat_fork_init,MUST_PASS,,,,
 vat_relaxed_ordering,MUST_PASS,,,,
 vat_reg_mr_latency,MUST_PASS,,,,
 vat_rc_qp_lifecycle,MUST_PASS,,,,
-vat_ud_qp_lifecycle,MUST_PASS,,,TICKET-414,ibv_create_qp(UD) failed: Invalid argument
-vat_ud_grh_handling,MUST_PASS,,,TICKET-414,same root cause as vat_ud_qp_lifecycle (TICKET-414)
+vat_ud_qp_lifecycle,NA,,,,UD QPs are not supported (ibv_create_qp(UD) returns EINVAL)
+vat_ud_grh_handling,NA,,,,UD QPs are not supported
 vat_srq_lifecycle,NA,,,,NIC firmware returns EOPNOTSUPP for SRQ create (SRQ is MUST_PASS on the previous NIC generation in mi350_ionic.csv)
 vat_ece_negotiation,NA,,,,ionic provider does not support ECE (ibv_query_ece unsupported)
 vat_rdma_write,MUST_PASS,,,,
-vat_rdma_read,MUST_PASS,,,TICKET-415,peer failed
+vat_rdma_read,NA,,,,RDMA READ is not supported
 vat_rdma_write_with_imm,MUST_PASS,,,,
 vat_rdma_write_chain,MUST_PASS,,,,
 vat_inline_send,MUST_PASS,,,,
-vat_atomic_fetch_add,MUST_PASS,,,TICKET-415,post-add counter 255 != 257 (same root cause suspected as vat_rdma_read)
+vat_atomic_fetch_add,NA,,,,RDMA atomics are not supported
 vat_ah_lifecycle,MUST_PASS,,,,
 vat_reg_mr_iova2,MUST_PASS,,,,
 vat_rc_qp_reset_recovery_loopback,KNOWN_FAILURE,,fail,,ionic ibv_modify_qp(RESET) defect
 vat_qp_err_transition,MUST_PASS,,,,
 vat_cqe_error_codes,MUST_PASS,,,,
 vat_rc_qp_reset_recovery,KNOWN_FAILURE,,fail,,ionic ibv_modify_qp(RESET) defect -- max_inline_data=0 hits broken WQE path
-# UD recovery uses destroy+recreate (fresh QPN), not the broken in-place RESET;
-# fails only because UD QP creation itself fails (TICKET-414), not the RESET defect.
-vat_2node_ud_recovery_protocol,MUST_PASS,,,TICKET-414,same root cause as vat_ud_qp_lifecycle (TICKET-414)
+vat_2node_ud_recovery_protocol,NA,,,,UD QPs are not supported
 vat_async_event_monitor,NA,,,,ionic does not raise QP async event for bogus-rkey fault (CQ error only)
 vat_ionic_sq_sig_all,MUST_PASS,,,,
 vat_ionic_inline_capacity,MUST_PASS,,,,
@@ -39,11 +37,11 @@ vat_ionic_gda_enable,MUST_PASS,sym:libionic,,,
 
 # ===================== HIP + Verbs mixed data-path =====================
 vat_vmm_dmabuf_reg_not_regmr,MUST_PASS,sym:hipMemGetHandleForAddressRange;sym:ibv_reg_dmabuf_mr,,,
-vat_gpu_read_flush_after_recv,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,TICKET-415,completion error: local QP operation error (same root cause suspected as vat_rdma_read)
+vat_gpu_read_flush_after_recv,NA,,,,the read flush uses RDMA READ, which is not supported
 vat_gpu_mr_dereg_inflight,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
 vat_gpu_nic_coherence_streamwait_wait_first,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
 vat_gpu_nic_coherence_streamwait_put_first,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
-vat_gpu_nic_coherence_streamwait_cross_nic,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr;sym:hipStreamWaitValue64,,,
+vat_gpu_nic_coherence_streamwait_cross_nic,NA,,,,GPU N can do GPUDirect RDMA only through its own NIC N; a cross-NIC path is unsupported
 vat_hipalloc_x_ibvreg__device__regmr,MUST_PASS,,,,
 vat_hipalloc_x_ibvreg__device__dmabuf_v1,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
 vat_hipalloc_x_ibvreg__device__dmabuf_v2_pcie,MUST_PASS,sym:hsa_amd_portable_export_dmabuf;sym:ibv_reg_dmabuf_mr,,,
