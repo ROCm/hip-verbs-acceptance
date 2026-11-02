@@ -67,9 +67,12 @@ class RcConn {
   //   dev_name -- exact device name to open; empty -> the selected HCA
   //               (ACCEPT_HCA) if set, else first device with an ACTIVE port found by
   //               ibv_get_device_list (port 1 only; no multi-port scan).
+  //   max_inline -- max_inline_data to request for the QP (0 = RCCL's default).
+  //               The provider may grant more or less; see max_inline().
   // Returns "" on success, else a human-readable reason. Sets no_device=true
   // when the host simply has no RDMA hardware (skip-worthy vs. a real fault).
-  std::string open(const std::string& dev_name, bool& no_device);
+  std::string open(const std::string& dev_name, bool& no_device,
+                   uint32_t max_inline = 0);
 
   // INIT -> RTR -> RTS against `remote`. For loopback pass local().
   std::string to_rts(const QpInfo& remote);
@@ -117,6 +120,8 @@ class RcConn {
   const QpInfo&       local() const { return local_; }
   const std::string&  dev_name() const { return dev_name_; }
   int                 gid_index() const { return gid_index_; }
+  // max_inline_data the provider granted at ibv_create_qp (bytes).
+  uint32_t            max_inline() const { return max_inline_; }
 
  private:
   std::string post_send_one(struct ibv_send_wr& wr);
@@ -134,6 +139,7 @@ class RcConn {
   int                 ib_port_    = 1;
   int                 gid_index_  = -1;    // set by open(); -1 = no routable RoCEv2 GID
   bool                has_atomics_ = false; // set by open(); mirrors INIT access flags
+  uint32_t            max_inline_  = 0;     // set by open(); granted max_inline_data
   enum ibv_mtu        path_mtu_   = IBV_MTU_4096; // see open()
 };
 
