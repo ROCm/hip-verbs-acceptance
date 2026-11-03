@@ -1,0 +1,239 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Stopgap: runs hva directly on Ruby via sbatch, bypassing CoCo entirely.
+# The eventual path (AICOMNET-413/439) wires hva into Ruby CI through CoCo,
+# but CoCo needs its own credential to check out the private ROCm/tRCCL
+# harness, which hasn't landed yet. Runner-pool access for this repo is
+# already approved independently of that credential, so this workflow needs
+# none of it -- it only builds and runs this repo's own binary.
+#
+# The runner (`ruby-linux-slurm-scale-runner`) is the Ruby login node, which
+# has no GPU/ROCm/ibverbs of its own, so the whole job -- including the build
+# -- runs inside one `sbatch --wait` batch job on an allocated compute node,
+# the same pattern as rocm-systems' rccl-ainic-tw-gfx950-runner.yml.
+#
+# No ROCm version matrix: unlike CoCo's planned 10.1-ga/10.2-latest stacks,
+# this just uses whatever ROCm is live on the allocated node. Report-only (not
+# a required check) until this has a green track record, matching
+# AICOMNET-413's own round-1 gating stance. Retire or fold into the CoCo path
+# once its credential lands.
+
+name: Ruby acceptance (hva)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+env:
+  POLICY: policy/mi350_thor.csv
+  SALLOC_PARTITION: interactive
+  SALLOC_QOS: vip_prio
+  SALLOC_TIME: '00:30:00'
+
+jobs:
+  hip-acceptance:
+    name: hip-acceptance
+    # Same-repo guard: a fork PR must not reach the self-hosted runner. Runs
+    # unconditionally for workflow_dispatch; on pull_request, only once the
+    # 'hip-acceptance' label is present (added or still there at a later sync).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.head.repo.fork &&
+       contains(github.event.pull_request.labels.*.name, 'hip-acceptance'))
+    runs-on: ruby-linux-slurm-scale-runner
+    timeout-minutes: 30
+    # Serialise on the shared node pool; never cancel a live allocation out
+    # from under itself.
+    concurrency:
+      group: hva-ruby-hip-acceptance
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run hip/* (sbatch)
+        id: run_tests
+        continue-on-error: true
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          set -o pipefail
+
+          BATCH_SCRIPT="${RUNNER_TEMP}/hip_acceptance.sbatch"
+          SLURM_OUT="${RUNNER_TEMP}/hip_acceptance_slurm.out"
+
+          export GITHUB_WORKSPACE POLICY REPORT_PATH
+
+          # Quoted heredoc: ${...} expand at job time on the compute node, not now.
+          cat > "${BATCH_SCRIPT}" <<'BATCH'
+          #!/bin/bash
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+
+          echo "== build (g++ $(g++ -dumpfullversion), $(hostname)) =="
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
+          cmake --build build -j
+
+          echo "== run: hip/* =="
+          ./build/hva --filter-category 'hip/*' --kind func \
+                --policy "${GITHUB_WORKSPACE}/${POLICY}" \
+                --report "${REPORT_PATH}"
+          BATCH
+
+          chmod +x "${BATCH_SCRIPT}"
+          : > "${SLURM_OUT}"
+
+          echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=1)..."
+          sbatch --wait \
+            --job-name=hva-hip \
+            --output="${SLURM_OUT}" \
+            --partition="${SALLOC_PARTITION}" \
+            --qos="${SALLOC_QOS}" \
+            --nodes=1 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            "${BATCH_SCRIPT}" &
+          SBATCH_PID=$!
+
+          tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
+          TAIL_PID=$!
+
+          wait "${SBATCH_PID}"
+          rc=$?
+
+          sleep 2
+          kill "${TAIL_PID}" 2>/dev/null || true
+
+          echo "sbatch --wait exit code: ${rc}"
+          exit "${rc}"
+
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hip-acceptance-report
+          path: |
+            ${{ github.workspace }}/report.json
+            ${{ runner.temp }}/hip_acceptance_slurm.out
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '### hip-acceptance'
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/hip_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1
+
+  verbs-acceptance:
+    name: verbs-acceptance
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.head.repo.fork &&
+       contains(github.event.pull_request.labels.*.name, 'verbs-acceptance'))
+    runs-on: ruby-linux-slurm-scale-runner
+    timeout-minutes: 30
+    concurrency:
+      group: hva-ruby-verbs-acceptance
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and run verbs/* (sbatch)
+        id: run_tests
+        continue-on-error: true
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          set -o pipefail
+
+          BATCH_SCRIPT="${RUNNER_TEMP}/verbs_acceptance.sbatch"
+          SLURM_OUT="${RUNNER_TEMP}/verbs_acceptance_slurm.out"
+
+          export GITHUB_WORKSPACE POLICY REPORT_PATH
+
+          cat > "${BATCH_SCRIPT}" <<'BATCH'
+          #!/bin/bash
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+
+          echo "== build (g++ $(g++ -dumpfullversion), $(hostname)) =="
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
+          cmake --build build -j
+
+          # Binary + policy must be at the same absolute path on both nodes;
+          # satisfied by GITHUB_WORKSPACE being on Ruby's NFS-shared home.
+          NODES="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | paste -sd,)"
+          echo "== run: verbs/* across ${NODES} =="
+          ./build/hva -n 2 -hosts "${NODES}" --filter-category 'verbs/*' --kind func \
+                --remote-launcher srun --launch-timeout 300 \
+                --policy "${GITHUB_WORKSPACE}/${POLICY}" \
+                --report "${REPORT_PATH}"
+          BATCH
+
+          chmod +x "${BATCH_SCRIPT}"
+          : > "${SLURM_OUT}"
+
+          echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=2)..."
+          sbatch --wait \
+            --job-name=hva-verbs \
+            --output="${SLURM_OUT}" \
+            --partition="${SALLOC_PARTITION}" \
+            --qos="${SALLOC_QOS}" \
+            --nodes=2 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            "${BATCH_SCRIPT}" &
+          SBATCH_PID=$!
+
+          tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
+          TAIL_PID=$!
+
+          wait "${SBATCH_PID}"
+          rc=$?
+
+          sleep 2
+          kill "${TAIL_PID}" 2>/dev/null || true
+
+          echo "sbatch --wait exit code: ${rc}"
+          exit "${rc}"
+
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verbs-acceptance-report
+          path: |
+            ${{ github.workspace }}/report.json
+            ${{ runner.temp }}/verbs_acceptance_slurm.out
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '### verbs-acceptance'
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/verbs_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: exit 1
