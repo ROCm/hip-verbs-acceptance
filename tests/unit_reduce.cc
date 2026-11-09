@@ -65,8 +65,8 @@ void check_reduce(const std::vector<Status>& in, Status want, const char* msg) {
 // apply_classification() helper. Asserts status / gate_fail / flagged together.
 void check_verdict(Status reduced, const Classification& c,
                    FinalStatus want_status, bool want_gate, bool want_flag,
-                   const char* msg) {
-  Verdict v = apply_classification(reduced, c);
+                   const char* msg, bool allow_known_failures = false) {
+  Verdict v = apply_classification(reduced, c, allow_known_failures);
   ++accept_test::g_checks;
   if (v.status != want_status || v.gate_fail != want_gate ||
       v.flagged != want_flag) {
@@ -123,6 +123,17 @@ void test_apply_classification() {
   // for a TwoNode test on a single-rank run). Gate must NOT fire in this case.
   check_verdict(Status::None, cls(Class::KnownFailure, "fail"),
                 FinalStatus::Na, false, false, "KNOWN_FAILURE None -> Na (gate-neutral)");
+
+  // allow_known_failures: an exact reproduction no longer gates ...
+  check_verdict(Status::Fail, cls(Class::KnownFailure, "fail"),
+                FinalStatus::Fail, false, false,
+                "KNOWN_FAILURE Fail (expected) + allow_known_failures",
+                /*allow_known_failures=*/true);
+  // ... but a mismatch ("possibly fixed") still gates regardless.
+  check_verdict(Status::Pass, cls(Class::KnownFailure, "fail"),
+                FinalStatus::Fail, true, false,
+                "KNOWN_FAILURE Pass (unexpected) + allow_known_failures",
+                /*allow_known_failures=*/true);
 
   // SKIP: software-gated; gate-neutral.
   check_verdict(Status::None, cls(Class::Skip),
