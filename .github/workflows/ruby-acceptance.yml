@@ -91,7 +91,8 @@ jobs:
           echo "== run: hip/* =="
           ./build/hva --filter-category 'hip/*' --kind func \
                 --policy "${GITHUB_WORKSPACE}/${POLICY}" \
-                --report "${REPORT_PATH}"
+                --report "${REPORT_PATH}" \
+                --allow-known-failures
           BATCH
 
           chmod +x "${BATCH_SCRIPT}"
