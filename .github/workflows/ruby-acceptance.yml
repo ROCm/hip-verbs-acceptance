@@ -18,6 +18,12 @@
 # a required check) until this has a green track record, matching
 # AICOMNET-413's own round-1 gating stance. Retire or fold into the CoCo path
 # once its credential lands.
+#
+# The per-job `if: !fork` guard is defense-in-depth, not the real boundary --
+# pull_request workflows run with the PR's own copy of this file, so a fork
+# could just delete the guard. The actual gate is the repo's "Require
+# approval for all outside collaborators" setting (Settings > Actions >
+# General > Fork pull request workflows); verify it's enabled.
 
 name: Ruby acceptance (hva)
 
@@ -46,7 +52,8 @@ jobs:
       (!github.event.pull_request.head.repo.fork &&
        contains(github.event.pull_request.labels.*.name, 'hip-acceptance'))
     runs-on: ruby-linux-slurm-scale-runner
-    timeout-minutes: 30
+    # SALLOC_TIME (30m) plus headroom for sbatch queue wait and upload.
+    timeout-minutes: 50
     # Serialise on the shared node pool; never cancel a live allocation out
     # from under itself.
     concurrency:
@@ -90,8 +97,19 @@ jobs:
           chmod +x "${BATCH_SCRIPT}"
           : > "${SLURM_OUT}"
 
+          JOBID_FILE="${RUNNER_TEMP}/hip_acceptance_jobid.txt"
+
+          # SBATCH_PID is only the local sbatch client; scancel the real
+          # Slurm job on exit/cancel instead of leaving it running.
+          JOB_ID=""
+          cleanup() {
+            [[ -n "${JOB_ID}" ]] && scancel "${JOB_ID}" 2>/dev/null
+            return 0
+          }
+          trap cleanup EXIT INT TERM
+
           echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=1)..."
-          sbatch --wait \
+          sbatch --wait --parsable \
             --job-name=hva-hip \
             --output="${SLURM_OUT}" \
             --partition="${SALLOC_PARTITION}" \
@@ -99,8 +117,14 @@ jobs:
             --nodes=1 \
             --exclusive \
             --time="${SALLOC_TIME}" \
-            "${BATCH_SCRIPT}" &
+            "${BATCH_SCRIPT}" > "${JOBID_FILE}" &
           SBATCH_PID=$!
+
+          for _ in $(seq 1 30); do
+            JOB_ID="$(cut -d';' -f1 "${JOBID_FILE}" 2>/dev/null || true)"
+            [[ -n "${JOB_ID}" ]] && break
+            sleep 1
+          done
 
           tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
           TAIL_PID=$!
@@ -113,6 +137,21 @@ jobs:
 
           echo "sbatch --wait exit code: ${rc}"
           exit "${rc}"
+
+      - name: Classify result
+        if: always()
+        id: classify
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
+            category=passed
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if d.get('summary',{}).get('failed',0) > 0 else 1)" 2>/dev/null; then
+            category=test-failure
+          else
+            category=infra-failure
+          fi
+          echo "category=${category}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload report and logs
         if: always()
@@ -129,6 +168,7 @@ jobs:
         run: |
           {
             echo '### hip-acceptance'
+            echo "result: ${{ steps.classify.outputs.category }}"
             echo '```'
             tail -n 80 "${RUNNER_TEMP}/hip_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
             echo '```'
@@ -136,7 +176,13 @@ jobs:
 
       - name: Fail job if tests failed
         if: steps.run_tests.outcome == 'failure'
-        run: exit 1
+        run: |
+          if [[ "${{ steps.classify.outputs.category }}" == "test-failure" ]]; then
+            echo "::error::hva reported failing test(s); see report.json"
+          else
+            echo "::error::sbatch/build/launch did not complete before producing a report.json (infra failure, not a confirmed test regression)"
+          fi
+          exit 1
 
   verbs-acceptance:
     name: verbs-acceptance
@@ -145,7 +191,8 @@ jobs:
       (!github.event.pull_request.head.repo.fork &&
        contains(github.event.pull_request.labels.*.name, 'verbs-acceptance'))
     runs-on: ruby-linux-slurm-scale-runner
-    timeout-minutes: 30
+    # SALLOC_TIME (30m) plus headroom for sbatch queue wait and upload.
+    timeout-minutes: 50
     concurrency:
       group: hva-ruby-verbs-acceptance
       cancel-in-progress: false
@@ -190,8 +237,19 @@ jobs:
           chmod +x "${BATCH_SCRIPT}"
           : > "${SLURM_OUT}"
 
+          JOBID_FILE="${RUNNER_TEMP}/verbs_acceptance_jobid.txt"
+
+          # SBATCH_PID is only the local sbatch client; scancel the real
+          # Slurm job on exit/cancel instead of leaving it running.
+          JOB_ID=""
+          cleanup() {
+            [[ -n "${JOB_ID}" ]] && scancel "${JOB_ID}" 2>/dev/null
+            return 0
+          }
+          trap cleanup EXIT INT TERM
+
           echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=2)..."
-          sbatch --wait \
+          sbatch --wait --parsable \
             --job-name=hva-verbs \
             --output="${SLURM_OUT}" \
             --partition="${SALLOC_PARTITION}" \
@@ -199,8 +257,14 @@ jobs:
             --nodes=2 \
             --exclusive \
             --time="${SALLOC_TIME}" \
-            "${BATCH_SCRIPT}" &
+            "${BATCH_SCRIPT}" > "${JOBID_FILE}" &
           SBATCH_PID=$!
+
+          for _ in $(seq 1 30); do
+            JOB_ID="$(cut -d';' -f1 "${JOBID_FILE}" 2>/dev/null || true)"
+            [[ -n "${JOB_ID}" ]] && break
+            sleep 1
+          done
 
           tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
           TAIL_PID=$!
@@ -213,6 +277,21 @@ jobs:
 
           echo "sbatch --wait exit code: ${rc}"
           exit "${rc}"
+
+      - name: Classify result
+        if: always()
+        id: classify
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
+            category=passed
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if d.get('summary',{}).get('failed',0) > 0 else 1)" 2>/dev/null; then
+            category=test-failure
+          else
+            category=infra-failure
+          fi
+          echo "category=${category}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload report and logs
         if: always()
@@ -229,6 +308,7 @@ jobs:
         run: |
           {
             echo '### verbs-acceptance'
+            echo "result: ${{ steps.classify.outputs.category }}"
             echo '```'
             tail -n 80 "${RUNNER_TEMP}/verbs_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
             echo '```'
@@ -236,4 +316,10 @@ jobs:
 
       - name: Fail job if tests failed
         if: steps.run_tests.outcome == 'failure'
-        run: exit 1
+        run: |
+          if [[ "${{ steps.classify.outputs.category }}" == "test-failure" ]]; then
+            echo "::error::hva reported failing test(s); see report.json"
+          else
+            echo "::error::sbatch/build/launch did not complete before producing a report.json (infra failure, not a confirmed test regression)"
+          fi
+          exit 1
