@@ -32,10 +32,12 @@ Status reduce(const std::vector<Status>& per_rank) {
   return Status::Pass;
 }
 
-Verdict apply_classification(Status reduced, const Classification& c) {
+Verdict apply_classification(Status reduced, const Classification& c,
+                             bool allow_known_failures) {
   // Discovery mode is handled in Policy::classify() — when no policy
-  // file is present all tests get Class::MustPass. There is no gate-disable
-  // path here; the parameter was removed to avoid misleading readers.
+  // file is present all tests get Class::MustPass. There is no blanket
+  // gate-disable path here; allow_known_failures only narrows gate_fail
+  // for an exactly-reproduced KNOWN_FAILURE (see below).
   Verdict v;
 
   switch (c.cls) {
@@ -54,9 +56,10 @@ Verdict apply_classification(Status reduced, const Classification& c) {
       break;
 
     case Class::KnownFailure: {
-      // KNOWN_FAILURE outputs as Fail to create fix pressure. The
-      // detail field carries context (ticket, "known failure possibly fixed").
-      // Gate always fails — expected or not.
+      // KNOWN_FAILURE outputs as Fail to create fix pressure. The gate fails
+      // too, unless it reproduced exactly as `expected` predicts and the
+      // caller passed allow_known_failures; a mismatch ("possibly fixed")
+      // always still gates.
       const std::string expected =
           c.expected_status.empty() ? "fail" : c.expected_status;
       const std::string actual = to_string(reduced);
@@ -69,6 +72,7 @@ Verdict apply_classification(Status reduced, const Classification& c) {
         v.note = "known failure possibly fixed";
       } else {
         v.note = "known failure";
+        if (allow_known_failures) v.gate_fail = false;
       }
       break;
     }
@@ -353,7 +357,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
       no_result = true;
     }
 
-    Verdict v = apply_classification(reduced, cls);
+    Verdict v = apply_classification(reduced, cls, in.allow_known_failures);
     if (no_result) {
       // Override the None-based classification: a missing result is a structural
       v.status = FinalStatus::Fail;

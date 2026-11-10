@@ -100,6 +100,9 @@ struct Options {
   std::string results_out;         // --results-out <path>
   bool quiet = false;              // --quiet (summary only; no per-test console lines)
   bool lint = false;               // --lint: report unlisted tests, no run
+  // --allow-known-failures: exact KNOWN_FAILURE reproduction no longer gates
+  // (still reported FAIL); a "possibly fixed" mismatch still gates.
+  bool allow_known_failures = false;
 
   // Multi-rank (Step 5).
   bool        worker = false;       // --worker (run one rank, write per-rank file)
@@ -192,6 +195,9 @@ void print_usage(std::FILE* out) {
     "  --perf-csv <file>       Also write the measured metrics as CSV (needs\n"
     "                          --kind perf|all to have anything to write)\n"
     "  --quiet                 Print only the summary (suppress per-test lines)\n"
+    "  --allow-known-failures  Exact KNOWN_FAILURE reproduction does not fail\n"
+    "                          the gate (still reported as FAIL); a mismatch\n"
+    "                          (\"possibly fixed\") still fails it regardless.\n"
     "  --lint                  Report registered tests absent from the policy;\n"
     "                          exit 1 if any found. Does not run tests.\n"
     "  --results-out <path>    Write raw per-worker results (debug)\n"
@@ -332,6 +338,8 @@ int parse_args(int argc, char** argv, Options& opt) {
       if (opt.mode == Mode::None) opt.mode = Mode::Run;
     } else if (a == "--quiet") {
       opt.quiet = true;
+    } else if (a == "--allow-known-failures") {
+      opt.allow_known_failures = true;
     } else if (a == "--policy") {
       if (!take_value(argc, argv, i, "--policy", opt.policy)) return 2;
       opt.policy_explicit = true;
@@ -787,6 +795,7 @@ std::vector<TestMeta> fill_report_selection(const Options& opt,
   in.discovery = discovery;
   in.quiet = opt.quiet;
   in.perf_csv = opt.perf_csv;
+  in.allow_known_failures = opt.allow_known_failures;
   const std::vector<std::string> hosts = split_nodes(opt.hosts);
   in.launch.np = opt.np;
   in.launch.ppn = effective_ppn(opt.np, opt.ppn, hosts.size());

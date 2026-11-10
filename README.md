@@ -150,14 +150,16 @@ ACCEPTANCE: PASS
 | Status | Meaning | Gate |
 |---|---|---|
 | `PASS` | test passed | ok |
-| `FAIL` | a `MUST_PASS` test failed/was skipped, or a `KNOWN_FAILURE` reproduced | **fails** |
+| `FAIL` | a `MUST_PASS` test failed/was skipped, or a `KNOWN_FAILURE` reproduced | **fails** (unless `--allow-known-failures`, see below) |
 | `SKIP` | software-gated (feature/symbol/ROCm version absent); classified `SKIP` in policy | neutral |
 | `NA`   | not applicable on this hardware (permanent); classified `NA` in policy | neutral |
 
 `KNOWN_FAILURE` tests always report `FAIL` on purpose — to keep pressure on the
-underlying bug. The gate is green only when nothing `MUST_PASS` fails and
-no known bug is present, so `ACCEPTANCE: FAIL` above is the tracked ROCm regression,
-not a suite defect.
+underlying bug. By default the gate is green only when nothing `MUST_PASS` fails
+and no known bug is present, so `ACCEPTANCE: FAIL` above is the tracked ROCm
+regression, not a suite defect. `--allow-known-failures` keeps the gate green
+for an exact reproduction; a "possibly fixed" mismatch still fails it
+regardless.
 
 **Exit codes:** `0` gate pass, `1` gate fail, `2` usage error, `3` I/O error
 (cannot open/write a result or report file, mkdtemp/port allocation failure),
@@ -186,6 +188,7 @@ not a suite defect.
 | `--forward-env LIST` | ssh launcher only: env vars forwarded to each worker (default list below; `--no-forward-env` disables) |
 | `--deadline-sec <s>` | worker-only; set automatically by the launcher (not a flag you pass by hand) so the worker self-destructs if the launcher gives up |
 | `--quiet` | print only the summary (suppress per-test lines) |
+| `--allow-known-failures` | an exactly-reproduced `KNOWN_FAILURE` no longer fails the gate (still reported as `FAIL`); a "possibly fixed" mismatch still fails the gate regardless |
 | `--list` | list all registered tests and exit |
 | `--lint` | report registered tests missing from the policy; do not run |
 

@@ -517,7 +517,9 @@ vat_ionic_*,NA,,,,               # wildcard: ionic-only tests are N/A on Connect
   possibly fixed" (it did not — update the policy). **Gate: `KNOWN_FAILURE` always
   outputs `Fail` and gate-fails** (same pressure to fix as `MUST_PASS`;
   the only exception is a reduced `none`, which becomes `NA`). This reverses the
-  earlier "never gate-fails" design.
+  earlier "never gate-fails" design. `--allow-known-failures` narrows that back
+  for an exact reproduction only (still reported `Fail`); a "possibly fixed"
+  mismatch always still gate-fails.
 - Each row carries **`ticket` + `reason`** → the files *are* the living known-issues
   registry.
 - **Reserved (not v1):** a `fw_version` column — firmware updates change behavior,
@@ -608,7 +610,7 @@ always contained and reported as the test's outcome.
 |---|---|---|---|---|
 | **MUST_PASS** | always applicable | yes (isolated) | `pass` / `fail` / `fail` (unexpected skip) | `fail` gate-fails |
 | **SKIP** | software-gated (`when` predicate on version/sym dim fails) | **no** | `skip` + reason (upgrade signal) | neutral |
-| **KNOWN_FAILURE** | known bug (tracked ticket) | yes (isolated) | **`fail`** — with detail "known failure" or "possibly fixed" | **gate FAIL** (same pressure as MUST_PASS) |
+| **KNOWN_FAILURE** | known bug (tracked ticket) | yes (isolated) | **`fail`** — with detail "known failure" or "possibly fixed" | **gate FAIL** (same pressure as MUST_PASS); exact reproduction is gate-neutral under `--allow-known-failures` |
 | **NA** | hardware-permanent (no upgrade will change it) | **no** | `na` + reason | neutral |
 | *(unlisted)* | not in policy | **not run, not in report** | — | — |
 
@@ -695,6 +697,8 @@ selection filter narrowed the run.
       "duration_ms": 12,
       "perf": {},                        // metric key→value map; populated under --kind perf|all (§9)
       "gate_fail": false,                // this test's contribution to the gate verdict
+                                          // (false for a KNOWN_FAILURE exact reproduction
+                                          // when run with --allow-known-failures)
       "flagged": false,                  // e.g. KNOWN_FAILURE "possibly fixed"
       "note": null
     }
@@ -851,6 +855,7 @@ hva -n <n> [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
            [--hide-na]                      # suppress NA rows from console
            [--lint]                         # list unlisted tests, exit non-zero, no run
            [--quiet]                        # suppress the per-test console stream
+           [--allow-known-failures]         # exact KNOWN_FAILURE reproduction is gate-neutral
 ```
 
 Internal modes (used by the launcher, not typed by hand):

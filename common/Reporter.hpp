@@ -50,8 +50,11 @@ struct Verdict {
   std::string note;               // e.g. "unclassified", "possibly fixed"
 };
 
-// Apply classification to a reduced status (§7.4).
-Verdict apply_classification(Status reduced, const Classification& c);
+// Apply classification to a reduced status (§7.4). `allow_known_failures`
+// exempts an exactly-reproduced KNOWN_FAILURE from gate_fail; a "possibly
+// fixed" mismatch still gates regardless.
+Verdict apply_classification(Status reduced, const Classification& c,
+                             bool allow_known_failures = false);
 
 // ---------------------------------------------------------------------------
 // Shared per-test line formatter (used by BOTH the Reporter end-block and the
@@ -104,6 +107,9 @@ struct ReportInputs {
   bool                                     quiet = false;
   // --perf-csv <path>: also write the measured metrics as CSV. Empty = off.
   std::string                              perf_csv;
+  // --allow-known-failures (see apply_classification()). Default false keeps
+  // today's always-fail behavior.
+  bool                                     allow_known_failures = false;
   // When true, the Runner already streamed the per-test lines live (to stderr)
   // as each test finished, so the Reporter must NOT re-print the end-block (it
   // would double-print). The summary is always printed regardless. Set by the

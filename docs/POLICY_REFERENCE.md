@@ -37,7 +37,7 @@ Vmm_Map_NoDeadlock_KernelInFlight,KNOWN_FAILURE,,fail,ROCM-25387,hipMemMap deadl
 | `MUST_PASS` | must pass on this platform | fails | fails | ok |
 | `SKIP` | software-gated absence is acceptable | (n/a, reported as skip) | neutral | ok |
 | `NA` | permanently not applicable on this hardware | (n/a, reported as na) | neutral | ok |
-| `KNOWN_FAILURE` | tracked bug | reproduced -> **still fails** (fix pressure) | - | unexpected pass -> **fails**, flagged "possibly fixed" |
+| `KNOWN_FAILURE` | tracked bug | reproduced -> **still fails** (unless `--allow-known-failures`) | - | unexpected pass -> **fails**, flagged "possibly fixed" |
 
 A registered test that is not listed in the (present) policy is **not run at
 all** (`classify_and_partition` silently excludes it — the policy is the
@@ -47,8 +47,15 @@ policy. Discovery mode (no policy file at all) is different: it treats every
 test as `MUST_PASS` and runs all of them.
 
 `KNOWN_FAILURE` always surfaces as `FAIL` by design to keep the bug
-visible; the gate goes green only once the bug is fixed (reclassify to `MUST_PASS`)
-or the behavior becomes permanent (reclassify to `NA`).
+visible; by default the gate goes red too, and goes green only once the bug is
+fixed (reclassify to `MUST_PASS`) or the behavior becomes permanent
+(reclassify to `NA`).
+
+`--allow-known-failures` relaxes the gate, not the reported status: an
+exactly-reproduced `KNOWN_FAILURE` still shows `FAIL`/"known failure", but
+`gate_fail` becomes `false`. A mismatch ("known failure possibly fixed")
+still fails the gate regardless — that's the signal a human needs to
+reclassify the policy. Off by default.
 
 ### when (optional)
 
