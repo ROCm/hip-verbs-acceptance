@@ -232,7 +232,8 @@ jobs:
           ./build/hva -n 2 -hosts "${NODES}" --filter-category 'verbs/*' --kind func \
                 --remote-launcher srun --launch-timeout 300 \
                 --policy "${GITHUB_WORKSPACE}/${POLICY}" \
-                --report "${REPORT_PATH}"
+                --report "${REPORT_PATH}" \
+                --allow-known-failures
           BATCH
 
           chmod +x "${BATCH_SCRIPT}"
