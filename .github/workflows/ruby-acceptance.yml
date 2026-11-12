@@ -130,8 +130,10 @@ jobs:
           tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
           TAIL_PID=$!
 
-          wait "${SBATCH_PID}"
-          rc=$?
+          # `|| rc=$?` (not a separate `rc=$?` line) so a failing wait doesn't
+          # trip -e before the tail-kill cleanup below runs.
+          rc=0
+          wait "${SBATCH_PID}" || rc=$?
 
           sleep 2
           kill "${TAIL_PID}" 2>/dev/null || true
@@ -147,7 +149,7 @@ jobs:
         run: |
           if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
             category=passed
-          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if d.get('summary',{}).get('failed',0) > 0 else 1)" 2>/dev/null; then
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if any(t.get('gate_fail') for t in d.get('tests', [])) else 1)" 2>/dev/null; then
             category=test-failure
           else
             category=infra-failure
@@ -271,8 +273,10 @@ jobs:
           tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
           TAIL_PID=$!
 
-          wait "${SBATCH_PID}"
-          rc=$?
+          # `|| rc=$?` (not a separate `rc=$?` line) so a failing wait doesn't
+          # trip -e before the tail-kill cleanup below runs.
+          rc=0
+          wait "${SBATCH_PID}" || rc=$?
 
           sleep 2
           kill "${TAIL_PID}" 2>/dev/null || true
@@ -288,7 +292,7 @@ jobs:
         run: |
           if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
             category=passed
-          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if d.get('summary',{}).get('failed',0) > 0 else 1)" 2>/dev/null; then
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if any(t.get('gate_fail') for t in d.get('tests', [])) else 1)" 2>/dev/null; then
             category=test-failure
           else
             category=infra-failure
