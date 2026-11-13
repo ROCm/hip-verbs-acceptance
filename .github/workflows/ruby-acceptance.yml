@@ -1,29 +1,6 @@
 # Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 #
-# Stopgap: runs hva directly on Ruby via sbatch, bypassing CoCo entirely.
-# The eventual path (AICOMNET-413/439) wires hva into Ruby CI through CoCo,
-# but CoCo needs its own credential to check out the private ROCm/tRCCL
-# harness, which hasn't landed yet. Runner-pool access for this repo is
-# already approved independently of that credential, so this workflow needs
-# none of it -- it only builds and runs this repo's own binary.
-#
-# The runner (`ruby-linux-slurm-scale-runner`) is the Ruby login node, which
-# has no GPU/ROCm/ibverbs of its own, so the whole job -- including the build
-# -- runs inside one `sbatch --wait` batch job on an allocated compute node,
-# the same pattern as rocm-systems' rccl-ainic-tw-gfx950-runner.yml.
-#
-# No ROCm version matrix: unlike CoCo's planned 10.1-ga/10.2-latest stacks,
-# this just uses whatever ROCm is live on the allocated node. Report-only (not
-# a required check) until this has a green track record, matching
-# AICOMNET-413's own round-1 gating stance. Retire or fold into the CoCo path
-# once its credential lands.
-#
-# The per-job `if: !fork` guard is defense-in-depth, not the real boundary --
-# pull_request workflows run with the PR's own copy of this file, so a fork
-# could just delete the guard. The actual gate is the repo's "Require
-# approval for all outside collaborators" setting (Settings > Actions >
-# General > Fork pull request workflows); verify it's enabled.
 
 name: Ruby acceptance (hva)
 
