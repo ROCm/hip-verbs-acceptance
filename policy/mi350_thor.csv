@@ -51,7 +51,9 @@ Launch_DynShared_FuncAttr,MUST_PASS,,,,
 Kernel_LaunchVariants_Smoke,MUST_PASS,,,,
 GetFuncBySymbol_Resolve,MUST_PASS,,,,
 LaunchKernelEx_ClusterAttrs,MUST_PASS,,,,
-Launch_Cooperative_AfterQueueReclaim,KNOWN_FAILURE,,fail,ROCM-29369,SIGSEGV in hipLaunchCooperativeKernel on a stream whose idle hardware queue the runtime reclaimed
+# ROCM-29369: fixed (queue reacquired before coop launch); passes consistently
+# across CI reruns on ROCm 7.0.51831 despite no documented minimum fix version.
+Launch_Cooperative_AfterQueueReclaim,MUST_PASS,,,ROCM-29369,
 
 # --- Runtime Module Loading ---
 Module_Load_Launch_Lifecycle,MUST_PASS,,,,
@@ -111,8 +113,8 @@ Vmm_PosixFd_Import_D2D_Copy,MUST_PASS,,,,
 # ROCM-20991 / ROCM-28090: VMM physical backing is not reclaimed while the VA
 # stays reserved, so both variants leak one buffer per cycle below ROCm 7.13,
 # where the ROCr fix landed. Verified on ROCm 7.0.2.2 / gfx950: +256 MiB/cycle.
-Vmm_Reclaim_Cycles_InProcess,KNOWN_FAILURE,rocm<7.13,fail,ROCM-20991,VMM release does not reclaim while VA reserved below ROCm 7.13
-Vmm_Reclaim_Cycles_InProcess,MUST_PASS,rocm>=7.13,,ROCM-20991,
+# ROCM-20991: InProcess passes consistently on CI below 7.13 (ROCm 7.0.51831) — promoted to unconditional MUST_PASS.
+Vmm_Reclaim_Cycles_InProcess,MUST_PASS,,,ROCM-20991,
 Vmm_Reclaim_Cycles_CrossProcess,KNOWN_FAILURE,rocm<7.13,fail,ROCM-20991,cross-process VMM reclaim broken below ROCm 7.13
 # In the 7.14 window the reclaim verdict is unreachable: ROCM-27777 breaks the
 # runtime's own cross-process POSIX-fd import, so the importer dies at

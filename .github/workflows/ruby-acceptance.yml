@@ -1,0 +1,308 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+
+name: Ruby acceptance (hva)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+env:
+  POLICY: policy/mi350_thor.csv
+  SALLOC_PARTITION: interactive
+  SALLOC_QOS: vip_prio
+  SALLOC_TIME: '00:30:00'
+
+jobs:
+  hip-acceptance:
+    name: hip-acceptance
+    # Same-repo guard: a fork PR must not reach the self-hosted runner. Runs
+    # unconditionally for workflow_dispatch; on pull_request, only once the
+    # 'hip-acceptance' label is present (added or still there at a later sync).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.head.repo.fork &&
+       contains(github.event.pull_request.labels.*.name, 'hip-acceptance'))
+    runs-on: ruby-linux-slurm-scale-runner
+    # SALLOC_TIME (30m) plus headroom for sbatch queue wait and upload.
+    timeout-minutes: 50
+    # Serialise on the shared node pool; never cancel a live allocation out
+    # from under itself.
+    concurrency:
+      group: hva-ruby-hip-acceptance
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and run hip/* (sbatch)
+        id: run_tests
+        continue-on-error: true
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          set -o pipefail
+
+          BATCH_SCRIPT="${RUNNER_TEMP}/hip_acceptance.sbatch"
+          SLURM_OUT="${RUNNER_TEMP}/hip_acceptance_slurm.out"
+
+          export GITHUB_WORKSPACE POLICY REPORT_PATH
+
+          # Quoted heredoc: ${...} expand at job time on the compute node, not now.
+          cat > "${BATCH_SCRIPT}" <<'BATCH'
+          #!/bin/bash
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+
+          echo "== build (g++ $(g++ -dumpfullversion), $(hostname)) =="
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
+          cmake --build build -j
+
+          echo "== run: hip/* =="
+          ./build/hva --filter-category 'hip/*' --kind func \
+                --policy "${GITHUB_WORKSPACE}/${POLICY}" \
+                --report "${REPORT_PATH}" \
+                --allow-known-failures
+          BATCH
+
+          chmod +x "${BATCH_SCRIPT}"
+          : > "${SLURM_OUT}"
+
+          JOBID_FILE="${RUNNER_TEMP}/hip_acceptance_jobid.txt"
+
+          # SBATCH_PID is only the local sbatch client; scancel the real
+          # Slurm job on exit/cancel instead of leaving it running.
+          JOB_ID=""
+          cleanup() {
+            [[ -n "${JOB_ID}" ]] && scancel "${JOB_ID}" 2>/dev/null
+            return 0
+          }
+          trap cleanup EXIT INT TERM
+
+          echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=1)..."
+          sbatch --wait --parsable \
+            --job-name=hva-hip \
+            --output="${SLURM_OUT}" \
+            --partition="${SALLOC_PARTITION}" \
+            --qos="${SALLOC_QOS}" \
+            --nodes=1 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            "${BATCH_SCRIPT}" > "${JOBID_FILE}" &
+          SBATCH_PID=$!
+
+          for _ in $(seq 1 30); do
+            JOB_ID="$(cut -d';' -f1 "${JOBID_FILE}" 2>/dev/null || true)"
+            [[ -n "${JOB_ID}" ]] && break
+            sleep 1
+          done
+
+          tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
+          TAIL_PID=$!
+
+          # `|| rc=$?` (not a separate `rc=$?` line) so a failing wait doesn't
+          # trip -e before the tail-kill cleanup below runs.
+          rc=0
+          wait "${SBATCH_PID}" || rc=$?
+
+          sleep 2
+          kill "${TAIL_PID}" 2>/dev/null || true
+
+          echo "sbatch --wait exit code: ${rc}"
+          exit "${rc}"
+
+      - name: Classify result
+        if: always()
+        id: classify
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
+            category=passed
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if any(t.get('gate_fail') for t in d.get('tests', [])) else 1)" 2>/dev/null; then
+            category=test-failure
+          else
+            category=infra-failure
+          fi
+          echo "category=${category}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hip-acceptance-report
+          path: |
+            ${{ github.workspace }}/report.json
+            ${{ runner.temp }}/hip_acceptance_slurm.out
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '### hip-acceptance'
+            echo "result: ${{ steps.classify.outputs.category }}"
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/hip_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: |
+          if [[ "${{ steps.classify.outputs.category }}" == "test-failure" ]]; then
+            echo "::error::hva reported failing test(s); see report.json"
+          else
+            echo "::error::sbatch/build/launch did not complete before producing a report.json (infra failure, not a confirmed test regression)"
+          fi
+          exit 1
+
+  verbs-acceptance:
+    name: verbs-acceptance
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.head.repo.fork &&
+       contains(github.event.pull_request.labels.*.name, 'verbs-acceptance'))
+    runs-on: ruby-linux-slurm-scale-runner
+    # SALLOC_TIME (30m) plus headroom for sbatch queue wait and upload.
+    timeout-minutes: 50
+    concurrency:
+      group: hva-ruby-verbs-acceptance
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and run verbs/* (sbatch)
+        id: run_tests
+        continue-on-error: true
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          set -o pipefail
+
+          BATCH_SCRIPT="${RUNNER_TEMP}/verbs_acceptance.sbatch"
+          SLURM_OUT="${RUNNER_TEMP}/verbs_acceptance_slurm.out"
+
+          export GITHUB_WORKSPACE POLICY REPORT_PATH
+
+          cat > "${BATCH_SCRIPT}" <<'BATCH'
+          #!/bin/bash
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+
+          echo "== build (g++ $(g++ -dumpfullversion), $(hostname)) =="
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+                -DACCEPT_WITH_HIP=ON -DACCEPT_WITH_IBVERBS=ON
+          cmake --build build -j
+
+          # Binary + policy must be at the same absolute path on both nodes;
+          # satisfied by GITHUB_WORKSPACE being on Ruby's NFS-shared home.
+          NODES="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | paste -sd,)"
+          echo "== run: verbs/* across ${NODES} =="
+          ./build/hva -n 2 -hosts "${NODES}" --filter-category 'verbs/*' --kind func \
+                --remote-launcher srun --launch-timeout 300 \
+                --policy "${GITHUB_WORKSPACE}/${POLICY}" \
+                --report "${REPORT_PATH}" \
+                --allow-known-failures
+          BATCH
+
+          chmod +x "${BATCH_SCRIPT}"
+          : > "${SLURM_OUT}"
+
+          JOBID_FILE="${RUNNER_TEMP}/verbs_acceptance_jobid.txt"
+
+          # SBATCH_PID is only the local sbatch client; scancel the real
+          # Slurm job on exit/cancel instead of leaving it running.
+          JOB_ID=""
+          cleanup() {
+            [[ -n "${JOB_ID}" ]] && scancel "${JOB_ID}" 2>/dev/null
+            return 0
+          }
+          trap cleanup EXIT INT TERM
+
+          echo "Submitting sbatch job (partition=${SALLOC_PARTITION} qos=${SALLOC_QOS} nodes=2)..."
+          sbatch --wait --parsable \
+            --job-name=hva-verbs \
+            --output="${SLURM_OUT}" \
+            --partition="${SALLOC_PARTITION}" \
+            --qos="${SALLOC_QOS}" \
+            --nodes=2 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            "${BATCH_SCRIPT}" > "${JOBID_FILE}" &
+          SBATCH_PID=$!
+
+          for _ in $(seq 1 30); do
+            JOB_ID="$(cut -d';' -f1 "${JOBID_FILE}" 2>/dev/null || true)"
+            [[ -n "${JOB_ID}" ]] && break
+            sleep 1
+          done
+
+          tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
+          TAIL_PID=$!
+
+          # `|| rc=$?` (not a separate `rc=$?` line) so a failing wait doesn't
+          # trip -e before the tail-kill cleanup below runs.
+          rc=0
+          wait "${SBATCH_PID}" || rc=$?
+
+          sleep 2
+          kill "${TAIL_PID}" 2>/dev/null || true
+
+          echo "sbatch --wait exit code: ${rc}"
+          exit "${rc}"
+
+      - name: Classify result
+        if: always()
+        id: classify
+        env:
+          REPORT_PATH: ${{ github.workspace }}/report.json
+        run: |
+          if [[ "${{ steps.run_tests.outcome }}" == "success" ]]; then
+            category=passed
+          elif [[ -s "${REPORT_PATH}" ]] && python3 -c "import json,sys; d=json.load(open('${REPORT_PATH}')); sys.exit(0 if any(t.get('gate_fail') for t in d.get('tests', [])) else 1)" 2>/dev/null; then
+            category=test-failure
+          else
+            category=infra-failure
+          fi
+          echo "category=${category}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload report and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verbs-acceptance-report
+          path: |
+            ${{ github.workspace }}/report.json
+            ${{ runner.temp }}/verbs_acceptance_slurm.out
+          if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '### verbs-acceptance'
+            echo "result: ${{ steps.classify.outputs.category }}"
+            echo '```'
+            tail -n 80 "${RUNNER_TEMP}/verbs_acceptance_slurm.out" 2>/dev/null || echo "(no log)"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Fail job if tests failed
+        if: steps.run_tests.outcome == 'failure'
+        run: |
+          if [[ "${{ steps.classify.outputs.category }}" == "test-failure" ]]; then
+            echo "::error::hva reported failing test(s); see report.json"
+          else
+            echo "::error::sbatch/build/launch did not complete before producing a report.json (infra failure, not a confirmed test regression)"
+          fi
+          exit 1
