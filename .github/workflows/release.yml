@@ -1,0 +1,74 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Release: on a vX.Y.Z tag, check the tag matches the harness version, build
+# the synthetic configuration as a smoke check, and publish a GitHub release
+# with a source tarball, its SHA-256 and an SPDX SBOM. Consumers such as CVS
+# pin these tags, so release tags are protected by a repository ruleset.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::release tags must look like v1.2.3, got '$TAG'"
+            exit 1
+          fi
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DACCEPT_WITH_HIP=OFF -DACCEPT_WITH_IBVERBS=OFF \
+                -DACCEPT_WERROR=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j --target hva
+
+      - name: Check the harness version
+        run: |
+          reported="$(./build/hva --version)"
+          echo "$reported"
+          if [[ "$reported" != "hva ${VERSION} "* ]]; then
+            echo "::error::hva --version does not match ${TAG}; bump kHarnessVersion in common/Version.hpp"
+            exit 1
+          fi
+
+      - name: Generate the SBOM and source tarball
+        run: |
+          mkdir dist
+          python3 scripts/generate_sbom.py --version "$VERSION" \
+                  --output "dist/hip-verbs-acceptance-${VERSION}.spdx.json"
+          git archive --format=tar.gz --prefix="hip-verbs-acceptance-${VERSION}/" \
+                      -o "dist/hip-verbs-acceptance-${VERSION}.tar.gz" "$TAG"
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >
+          gh release create "$TAG" dist/*
+          --verify-tag --generate-notes
+          --title "hip-verbs-acceptance $TAG"

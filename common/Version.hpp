@@ -14,6 +14,6 @@
 
 namespace acceptance {
 
-inline constexpr const char* kHarnessVersion = "0.1.0-phase1";
+inline constexpr const char* kHarnessVersion = "0.1.0";
 
 }  // namespace acceptance

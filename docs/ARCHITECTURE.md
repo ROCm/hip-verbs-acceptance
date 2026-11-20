@@ -647,7 +647,7 @@ selection filter narrowed the run.
 ```jsonc
 {
   "schema_version": "1.3",
-  "harness": { "version": "0.1.0-phase1", "git_sha": "9133e10-dirty" },
+  "harness": { "version": "0.1.0", "git_sha": "9133e10-dirty" },
                                                 // build-time harness version + git SHA;
                                                 // git_sha is "unknown" for a build with
                                                 // no .git (e.g. a source tarball)
