@@ -1,0 +1,160 @@
+# Copyright (c) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Temporary: one-off trial of the CVS hva suites (install_hva, hva_cvs) on two
+# Ruby nodes. Lives only on the cvs-ruby-trial branch; not for merge.
+
+name: CVS trial on Ruby (temporary)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+env:
+  HVA_TAG: v0.1.0
+  CVS_REPO: https://github.com/nikitaxgusev/cvs.git
+  CVS_BRANCH: hva-integration
+  SALLOC_PARTITION: interactive
+  SALLOC_QOS: vip_prio
+  SALLOC_TIME: '00:40:00'
+
+jobs:
+  cvs-trial:
+    name: cvs-trial
+    if: >-
+      !github.event.pull_request.head.repo.fork &&
+      github.head_ref == 'cvs-ruby-trial'
+    runs-on: ruby-linux-slurm-scale-runner
+    timeout-minutes: 60
+    concurrency:
+      group: hva-ruby-cvs-trial
+      cancel-in-progress: false
+    steps:
+      - name: Prepare CVS and the hva mirror
+        run: |
+          set -euxo pipefail
+          cd "${RUNNER_TEMP}"
+          rm -rf cvs hva-mirror cvs-venv
+          git clone -q --branch "${CVS_BRANCH}" "${CVS_REPO}" cvs
+          git clone -q https://github.com/ROCm/hip-verbs-acceptance.git hva-mirror
+          git -C hva-mirror rev-parse "${HVA_TAG}"
+          python3 --version
+          python3 -m venv cvs-venv
+          cvs-venv/bin/pip install -q --upgrade pip setuptools packaging wheel
+          cvs-venv/bin/pip install -q -e cvs
+          cvs-venv/bin/cvs --version
+
+      - name: Run install_hva and hva_cvs on two nodes (sbatch)
+        id: run
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          OUT_DIR="${RUNNER_TEMP}/cvs-out"
+          rm -rf "${OUT_DIR}" && mkdir -p "${OUT_DIR}"
+          BATCH_SCRIPT="${RUNNER_TEMP}/cvs_trial.sbatch"
+          SLURM_OUT="${OUT_DIR}/slurm.out"
+          export RUNNER_TEMP OUT_DIR HVA_TAG
+
+          cat > "${BATCH_SCRIPT}" <<'BATCH'
+          #!/bin/bash
+          set -uo pipefail
+          NODES=($(scontrol show hostnames "${SLURM_JOB_NODELIST}"))
+          echo "== nodes: ${NODES[*]}  head: $(hostname)  user: ${USER} =="
+          KEY=""
+          for k in "${HOME}/.ssh/id_ed25519" "${HOME}/.ssh/id_rsa"; do
+            [[ -f "$k" ]] && { KEY="$k"; break; }
+          done
+          echo "== ssh key: ${KEY:-none} =="
+          for n in "${NODES[@]}"; do
+            if ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$n" hostname; then
+              echo "ssh to $n: OK"
+            else
+              echo "ssh to $n: FAILED"
+            fi
+          done
+
+          cd "${OUT_DIR}"
+          python3 - "${KEY}" "${NODES[@]}" <<'PY'
+          import json, os, sys
+          key, nodes = sys.argv[1], sys.argv[2:]
+          json.dump({
+              "username": os.environ["USER"],
+              "priv_key_file": key,
+              "head_node_dict": {"mgmt_ip": nodes[0]},
+              "env_vars": {},
+              "node_dict": {n: {"bmc_ip": "NA", "vpc_ip": n} for n in nodes},
+          }, open("cluster.json", "w"), indent=2)
+          json.dump({"hip_verbs_acceptance": {
+              "path": f"/tmp/{os.environ['USER']}/hva-cvs-{os.environ['SLURM_JOB_ID']}",
+              "git_url": os.path.join(os.environ["RUNNER_TEMP"], "hva-mirror"),
+              "git_tag": os.environ["HVA_TAG"],
+              "rocm_path": "",
+              "policy": "",
+              "allow_known_failures": True,
+              "hip_timeout": 1500,
+              "verbs_timeout": 900,
+          }}, open("config.json", "w"), indent=2)
+          PY
+          cat cluster.json config.json
+
+          CVS="${RUNNER_TEMP}/cvs-venv/bin/cvs"
+          rc=0
+          echo "== cvs run install_hva =="
+          "${CVS}" run install_hva --cluster_file cluster.json --config_file config.json || rc=1
+          echo "== cvs run hva_cvs =="
+          "${CVS}" run hva_cvs --cluster_file cluster.json --config_file config.json || rc=1
+          cp -r "${RUNNER_TEMP}/cvs/cvs_runs" "${OUT_DIR}/" 2>/dev/null || true
+          for n in "${NODES[@]}"; do
+            ssh -o BatchMode=yes "$n" "rm -rf /tmp/${USER}/hva-cvs-${SLURM_JOB_ID}" 2>/dev/null || true
+          done
+          exit "${rc}"
+          BATCH
+
+          chmod +x "${BATCH_SCRIPT}"
+          : > "${SLURM_OUT}"
+          JOBID_FILE="${RUNNER_TEMP}/cvs_trial_jobid.txt"
+          JOB_ID=""
+          cleanup() {
+            [[ -n "${JOB_ID}" ]] && scancel "${JOB_ID}" 2>/dev/null
+            return 0
+          }
+          trap cleanup EXIT INT TERM
+
+          sbatch --wait --parsable \
+            --job-name=hva-cvs-trial \
+            --output="${SLURM_OUT}" \
+            --partition="${SALLOC_PARTITION}" \
+            --qos="${SALLOC_QOS}" \
+            --nodes=2 \
+            --exclusive \
+            --time="${SALLOC_TIME}" \
+            "${BATCH_SCRIPT}" > "${JOBID_FILE}" &
+          SBATCH_PID=$!
+          for _ in $(seq 1 30); do
+            JOB_ID="$(cut -d';' -f1 "${JOBID_FILE}" 2>/dev/null || true)"
+            [[ -n "${JOB_ID}" ]] && break
+            sleep 1
+          done
+          tail -n +1 -F "${SLURM_OUT}" 2>/dev/null &
+          TAIL_PID=$!
+          rc=0
+          wait "${SBATCH_PID}" || rc=$?
+          sleep 2
+          kill "${TAIL_PID}" 2>/dev/null || true
+          echo "sbatch --wait exit code: ${rc}"
+          exit "${rc}"
+
+      - name: Upload CVS results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cvs-trial
+          path: ${{ runner.temp }}/cvs-out
+          if-no-files-found: warn
+
+      - name: Fail job if the trial failed
+        if: steps.run.outcome == 'failure'
+        run: exit 1
