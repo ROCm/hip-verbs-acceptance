@@ -89,6 +89,18 @@ std::string pick_detail(const Verdict& v, const std::string& synth,
 struct ReportInputs {
   std::string                              vendor;
   bool                                     discovery = false;  // policy absent
+  // How the policy file was chosen, emitted as report.json `policy`.
+  struct PolicyInfo {
+    std::string              selected_by;  // "policy" | "vendor" | "auto"
+    std::string              key;          // policy key, e.g. "mi350_thor"
+    // Auto-selection inputs ("" otherwise): gpu_platform_key() of the GPU arch
+    // ("" when unmapped) and env.vendor of this rank's HCA.
+    std::string              gpu_key;
+    std::string              nic_key;
+    std::vector<std::string> tried;        // candidate files, in lookup order
+    std::string              path;         // the loaded file; "" when none
+  };
+  PolicyInfo                               policy;
   // The SELECTED test ids (post --filter/--kind). The Reporter emits a row for
   // each of these and nothing else. NA synthesis is limited to this set too.
   std::set<std::string>                    selected_ids;
