@@ -467,6 +467,12 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << jnum(static_cast<long long>(d.gid_index)) << ","
           << "\n            \"gid_type\": "  << jstr_or_null(d.gid_type) << ","
           << "\n            \"port_state\": " << jstr_or_null(d.port_state) << ","
+          << "\n            \"vendor\": "    << jstr_or_null(d.vendor) << ","
+          << "\n            \"vendor_source\": " << jstr_or_null(d.vendor_source) << ","
+          << "\n            \"pci_vendor\": " << jstr_or_null(d.pci_vendor) << ","
+          << "\n            \"pci_device\": " << jstr_or_null(d.pci_device) << ","
+          << "\n            \"pci_subsystem_device\": "
+          << jstr_or_null(d.pci_subsystem_device) << ","
           // vendor_id/vendor_part_id are -1 when not queried (default build):
           // emit null in that case, the numeric value otherwise.
           << "\n            \"vendor_id\": "
@@ -535,11 +541,13 @@ int write_report(const Policy& policy, const ReportInputs& in,
           << ", \"ambiguous\": " << jbool(a.ambiguous) << "}";
     }
     const topology::Pair& pair = env.rank_pair;
+    const RdmaDevice* hca = find_rdma_device(env, pair.hca);
     nodes_json
         << "]"
         << "\n      },"
         << "\n      \"topology\": {"
         << "\n        \"hca\": "        << jstr_or_null(pair.hca) << ","
+        << "\n        \"hca_vendor\": " << jstr_or_null(hca ? hca->vendor : "") << ","
         << "\n        \"gpu\": "        << jnum(static_cast<long long>(pair.gpu)) << ","
         << "\n        \"hca_source\": " << jstr_or_null(pair.hca_source) << ","
         << "\n        \"gpu_source\": " << jstr_or_null(pair.gpu_source) << ","
@@ -581,15 +589,29 @@ int write_report(const Policy& policy, const ReportInputs& in,
     launch_hosts += (i ? ", " : "") + jstr(in.launch.hosts[i]);
   launch_hosts += "]";
 
+  const ReportInputs::PolicyInfo& pol = in.policy;
+  std::string policy_tried = "[";
+  for (size_t i = 0; i < pol.tried.size(); ++i)
+    policy_tried += (i ? ", " : "") + jstr(pol.tried[i]);
+  policy_tried += "]";
+
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.3") << ","
+      << "\n  \"schema_version\": " << jstr("1.4") << ","
       << "\n  \"harness\": {"
       << "\n    \"version\": " << jstr(kHarnessVersion) << ","
       << "\n    \"git_sha\": "  << jstr(kGitSha)
       << "\n  },"
       << "\n  \"mode\": " << jstr(discovery ? "discovery" : "gate") << ","
+      << "\n  \"policy\": {"
+      << "\n    \"path\": "        << jstr_or_null(pol.path) << ","
+      << "\n    \"selected_by\": " << jstr_or_null(pol.selected_by) << ","
+      << "\n    \"key\": "         << jstr_or_null(pol.key) << ","
+      << "\n    \"gpu_key\": "     << jstr_or_null(pol.gpu_key) << ","
+      << "\n    \"nic_key\": "     << jstr_or_null(pol.nic_key) << ","
+      << "\n    \"tried\": "       << policy_tried
+      << "\n  },"
       << "\n  \"filtered\": " << jbool(in.filtered) << ","
       << "\n  \"launch\": {"
       << "\n    \"np\": "    << jnum(static_cast<long long>(in.launch.np)) << ","
@@ -654,7 +676,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
   const bool gate_pass = !gate_fail_any;
   std::printf(
       "report: mode=%s | pass=%d fail=%d skip=%d na=%d | flagged=%d | -> %s\n",
-      in.discovery ? "discovery" : "gate",
+      in.discovery ? "discovery (no policy)" : "gate",
       n_pass, n_fail, n_skip, n_na, n_flagged, report_path.c_str());
   if (gate_pass) {
     std::printf("ACCEPTANCE: PASS\n");

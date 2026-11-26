@@ -69,6 +69,15 @@ struct RdmaDevice {
   int         gid_index = -1;   // selected RoCEv2 gid index (-1 = none found)
   std::string gid_type;         // .../ports/<p>/gid_attrs/types/<i> (e.g. "RoCE v2")
   std::string port_state;       // first port's state, e.g. "ACTIVE", "DOWN" ("" = unknown)
+  // PCI IDs of the NIC function from .../device/{vendor,device,subsystem_device},
+  // normalized to "0x%04x" ("" = unreadable). The vendor ID alone picks
+  // `vendor`; device/subsystem_device identify the model (e.g. Broadcom
+  // 0x1760 = Thor 2) and are recorded for the report only.
+  std::string pci_vendor;
+  std::string pci_device;
+  std::string pci_subsystem_device;
+  std::string vendor;           // connectx | thor | ionic | unknown (from pci_vendor)
+  std::string vendor_source;    // "pci" (pci_vendor read) | "none" (unreadable)
   // Optional ibverbs enrichment (only populated under ACCEPT_HAVE_IBVERBS).
   // -1 means "not queried / unknown". ibv_query_device reports these as 32-bit.
   int         vendor_id = -1;       // ibv_device_attr.vendor_id
@@ -77,8 +86,12 @@ struct RdmaDevice {
 
 // The per-node environment descriptor.
 struct EnvironmentInfo {
-  std::string vendor;       // connectx | thor | ionic | unknown | synthetic
-  std::string rdma_prefix;  // mlx5_ | bnxt_re | ionic (from the first device)
+  // Vendor of this rank's HCA (rdma_devices[0] after detect()); "unknown" with
+  // no devices. Other devices may differ, see mixed_vendor_warning().
+  std::string vendor;       // connectx | thor | ionic | unknown
+  // Name prefix of the first device: mlx5_ | bnxt_re | ionic, "" otherwise.
+  // Informational only; the vendor comes from the PCI vendor ID.
+  std::string rdma_prefix;
   // ROCm version actually in use, resolved via a priority chain so it matches
   // the ROCm that hva's HIP dlopen wrapper loaded rather than whatever happens
   // to sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
@@ -142,6 +155,27 @@ std::string decode_hip_version(int version);
 // Pure filesystem read -- unit-testable without HIP or dlopen.
 std::optional<std::string> find_info_version(const std::string& start_dir,
                                               int max_levels);
+
+// NIC vendor key for a PCI vendor ID string ("0x15b3" -> connectx, "0x14e4" ->
+// thor, "0x1dd8" -> ionic); "unknown" for anything else, including "".
+std::string nic_vendor_from_pci(const std::string& pci_vendor);
+
+// Enumerate the RDMA devices under `ib_root` (normally /sys/class/infiniband),
+// sorted by name. Best-effort: unreadable attributes stay empty/default.
+std::vector<RdmaDevice> probe_rdma_devices(const std::string& ib_root);
+
+// Make `hca` this rank's device: move it to the front of env.rdma_devices (no
+// move when absent or ""), then set env.vendor from the front device's stored
+// vendor ("unknown" with no devices) and env.rdma_prefix from its name.
+void select_rank_hca(EnvironmentInfo& env, const std::string& hca);
+
+// The device named `name` in env.rdma_devices, or nullptr.
+const RdmaDevice* find_rdma_device(const EnvironmentInfo& env,
+                                   const std::string& name);
+
+// "" when all RDMA devices share one vendor; otherwise one line (no "WARN: "
+// prefix) listing the devices per vendor and env.vendor, the one in use.
+std::string mixed_vendor_warning(const EnvironmentInfo& env);
 
 // Probe the local node. Best-effort, never throws. Honors ACCEPT_FAKE_ENV (see
 // file header) as a deterministic test seam.

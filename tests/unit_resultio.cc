@@ -222,6 +222,11 @@ void test_result_io_env_round_trip() {
   d0.gid_type = "RoCE v2";
   d0.vendor_id = 0x14e4;       // Broadcom
   d0.vendor_part_id = 0x1750;  // exercises the ibverbs-enrichment fields
+  d0.pci_vendor = "0x14e4";
+  d0.pci_device = "0x1760";
+  d0.pci_subsystem_device = "0x5208";
+  d0.vendor = "thor";
+  d0.vendor_source = "pci";
   env.rdma_devices.push_back(d0);
   RdmaDevice d1;
   d1.device = "bnxt_re1";
@@ -229,6 +234,8 @@ void test_result_io_env_round_trip() {
   d1.fw_ver = "230.0.1";
   d1.gid_index = 5;
   d1.gid_type = "RoCE v2";
+  d1.vendor = "unknown";
+  d1.vendor_source = "none";
   env.rdma_devices.push_back(d1);
   // >=2 GPU devices + affinity entries so the gpu./affinity. indexed flattening
   // is covered (these arrays were previously serialized but never round-tripped).
@@ -302,6 +309,22 @@ void test_result_io_env_round_trip() {
     // device1 left vendor_id/part_id unset -> default -1 survives round-trip.
     CHECK(got_env.rdma_devices[1].vendor_id == -1,
           "env round-trip: device1 vendor_id default -1");
+    CHECK_EQ_STR(got_env.rdma_devices[0].pci_vendor, "0x14e4",
+                 "env round-trip: device0 pci_vendor");
+    CHECK_EQ_STR(got_env.rdma_devices[0].pci_device, "0x1760",
+                 "env round-trip: device0 pci_device");
+    CHECK_EQ_STR(got_env.rdma_devices[0].pci_subsystem_device, "0x5208",
+                 "env round-trip: device0 pci_subsystem_device");
+    CHECK_EQ_STR(got_env.rdma_devices[0].vendor, "thor",
+                 "env round-trip: device0 vendor");
+    CHECK_EQ_STR(got_env.rdma_devices[0].vendor_source, "pci",
+                 "env round-trip: device0 vendor_source");
+    CHECK_EQ_STR(got_env.rdma_devices[1].vendor, "unknown",
+                 "env round-trip: device1 vendor");
+    CHECK_EQ_STR(got_env.rdma_devices[1].vendor_source, "none",
+                 "env round-trip: device1 vendor_source");
+    CHECK_EQ_STR(got_env.rdma_devices[1].pci_vendor, "",
+                 "env round-trip: device1 empty pci_vendor");
   }
   // gpu_devices + gpu_nic_affinity round-trip.
   CHECK(got_env.gpu_devices.size() == 2,

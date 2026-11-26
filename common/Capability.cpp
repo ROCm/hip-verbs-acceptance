@@ -228,25 +228,26 @@ std::string kv_safe(std::string s) {
   return s;
 }
 
-// Map an infiniband device NAME to (vendor, rdma_prefix) by its canonical prefix.
-void vendor_from_device(const std::string& dev, std::string& vendor,
-                        std::string& prefix) {
-  auto starts_with = [&](const char* p) {
-    return dev.compare(0, std::strlen(p), p) == 0;
-  };
-  if (starts_with("mlx5_")) {
-    vendor = "connectx";
-    prefix = "mlx5_";
-  } else if (starts_with("bnxt_re")) {
-    vendor = "thor";
-    prefix = "bnxt_re";
-  } else if (starts_with("ionic") || starts_with("rocep")) {
-    vendor = "ionic";
-    prefix = "ionic";
-  } else {
-    vendor = "unknown";
-    prefix.clear();
+// The canonical driver prefix of an infiniband device NAME, "" when none.
+// Renamed devices (rdma0, rocep<bus>s<slot>) have none.
+std::string rdma_prefix_from_device(const std::string& dev) {
+  for (const char* p : {"mlx5_", "bnxt_re", "ionic"}) {
+    if (dev.compare(0, std::strlen(p), p) == 0) return p;
   }
+  return std::string();
+}
+
+// A sysfs PCI ID attribute ("0x15b3") normalized to "0x%04x"; "" when the file
+// is unreadable or does not hold a 16-bit hex ID.
+std::string read_pci_id(const std::string& path) {
+  const std::string v = read_attr(path);
+  if (v.size() < 3 || v.size() > 6 || v.compare(0, 2, "0x") != 0 ||
+      v.find_first_not_of("0123456789abcdefABCDEF", 2) != std::string::npos) {
+    return std::string();
+  }
+  char buf[8];
+  std::snprintf(buf, sizeof(buf), "0x%04lx", std::stoul(v.substr(2), nullptr, 16));
+  return buf;
 }
 
 // Parse PRETTY_NAME="..." out of /etc/os-release content.
@@ -727,9 +728,7 @@ void resolve_rocm_version(EnvironmentInfo& env) {
 
 // The deterministic fixed descriptor returned when ACCEPT_FAKE_ENV is set.
 EnvironmentInfo fake_env() {
-  EnvironmentInfo env;
-  env.vendor = "thor";
-  env.rdma_prefix = "bnxt_re";
+  EnvironmentInfo env;  // vendor/rdma_prefix: set by detect() from the devices
   env.rocm_version = "0.0-fake";
   env.rocm_path = "/fake/rocm";
   env.rocm_version_source = "opt_rocm";
@@ -759,6 +758,11 @@ EnvironmentInfo fake_env() {
     d.gid_index = 3;
     d.gid_type = "RoCE v2";
     d.port_state = "ACTIVE";
+    d.pci_vendor = "0x14e4";
+    d.pci_device = "0x1760";
+    d.pci_subsystem_device = "0x0000";
+    d.vendor = "thor";
+    d.vendor_source = "pci";
     env.rdma_devices.push_back(d);
   }
   for (int i = 0; i < env.gpu_count; ++i) {
@@ -804,37 +808,8 @@ namespace {
 EnvironmentInfo probe_env() {
   EnvironmentInfo env;
 
-  // --- RDMA device enumeration -------------------------------------------
-  const std::string ib_base = "/sys/class/infiniband";
-  const std::vector<std::string> devs = list_dir(ib_base);
-  for (const std::string& name : devs) {
-    const std::string dev_path = ib_base + "/" + name;
-    RdmaDevice d;
-    d.device = name;
-    d.fw_ver = read_attr(dev_path + "/fw_ver");
-    d.board_id = read_attr(dev_path + "/board_id");
-    d.node_guid = read_attr(dev_path + "/node_guid");
-    // Associated netdev: the single entry under .../device/net/.
-    const std::vector<std::string> nets = list_dir(dev_path + "/device/net");
-    if (!nets.empty()) d.netdev = nets.front();
-    select_gid(dev_path, d);
-    // First port's state, "4: ACTIVE" -> "ACTIVE".
-    if (const std::vector<std::string> ports = list_dir(dev_path + "/ports");
-        !ports.empty()) {
-      const std::string st = read_attr(dev_path + "/ports/" + ports.front() + "/state");
-      const std::size_t colon = st.find(": ");
-      d.port_state = colon == std::string::npos ? st : st.substr(colon + 2);
-    }
-    env.rdma_devices.push_back(std::move(d));
-  }
-
-  // Vendor/prefix come from the FIRST device's name; no devices -> unknown.
-  if (!env.rdma_devices.empty()) {
-    vendor_from_device(env.rdma_devices.front().device, env.vendor,
-                       env.rdma_prefix);
-  } else {
-    env.vendor = "unknown";
-  }
+  // --- RDMA device enumeration (env.vendor is set by detect()) -------------
+  env.rdma_devices = probe_rdma_devices("/sys/class/infiniband");
 
   // --- GPU devices + count (KFD topology, dep-free sysfs) -------------------
   env.gpu_count = detect_gpu_devices(env.gpu_devices);
@@ -876,20 +851,102 @@ EnvironmentInfo detect() {
       std::getenv("ACCEPT_FAKE_ENV") != nullptr ? fake_env() : probe_env();
 
   // This rank's GPU/HCA pair (--hca / --device / local rank; see
-  // Topology.hpp). The HCA moves to the front so vendor detection, the GID and
+  // Topology.hpp). The HCA moves to the front so env.vendor, the GID and
   // "first device" readers describe the NIC actually used (mirrors RCCL's
   // NCCL_IB_HCA).
   env.rank_pair = topology::get_rank_pair(env);
+  select_rank_hca(env, env.rank_pair.hca);
+  return env;
+}
+
+std::string nic_vendor_from_pci(const std::string& pci_vendor) {
+  if (pci_vendor == "0x15b3") return "connectx";  // Mellanox / NVIDIA
+  if (pci_vendor == "0x14e4") return "thor";      // Broadcom
+  if (pci_vendor == "0x1dd8") return "ionic";     // AMD Pensando
+  return "unknown";
+}
+
+std::vector<RdmaDevice> probe_rdma_devices(const std::string& ib_root) {
+  std::vector<RdmaDevice> out;
+  for (const std::string& name : list_dir(ib_root)) {
+    const std::string dev_path = ib_root + "/" + name;
+    RdmaDevice d;
+    d.device = name;
+    d.fw_ver = read_attr(dev_path + "/fw_ver");
+    d.board_id = read_attr(dev_path + "/board_id");
+    d.node_guid = read_attr(dev_path + "/node_guid");
+    // Associated netdev: the single entry under .../device/net/.
+    const std::vector<std::string> nets = list_dir(dev_path + "/device/net");
+    if (!nets.empty()) d.netdev = nets.front();
+    // The immediate device/ link is the NIC's PCI function (as in RCCL's
+    // rcclDetectIBNics()); the name says nothing reliable about the vendor.
+    d.pci_vendor = read_pci_id(dev_path + "/device/vendor");
+    d.pci_device = read_pci_id(dev_path + "/device/device");
+    d.pci_subsystem_device = read_pci_id(dev_path + "/device/subsystem_device");
+    d.vendor = nic_vendor_from_pci(d.pci_vendor);
+    d.vendor_source = d.pci_vendor.empty() ? "none" : "pci";
+    select_gid(dev_path, d);
+    // First port's state, "4: ACTIVE" -> "ACTIVE".
+    if (const std::vector<std::string> ports = list_dir(dev_path + "/ports");
+        !ports.empty()) {
+      const std::string st = read_attr(dev_path + "/ports/" + ports.front() + "/state");
+      const std::size_t colon = st.find(": ");
+      d.port_state = colon == std::string::npos ? st : st.substr(colon + 2);
+    }
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
+void select_rank_hca(EnvironmentInfo& env, const std::string& hca) {
   for (std::size_t i = 1; i < env.rdma_devices.size(); ++i) {
-    if (env.rdma_devices[i].device == env.rank_pair.hca) {
+    if (!hca.empty() && env.rdma_devices[i].device == hca) {
       std::rotate(env.rdma_devices.begin(), env.rdma_devices.begin() + i,
                   env.rdma_devices.begin() + i + 1);
-      vendor_from_device(env.rdma_devices.front().device, env.vendor,
-                         env.rdma_prefix);
       break;
     }
   }
-  return env;
+  if (env.rdma_devices.empty()) {
+    env.vendor = "unknown";
+    env.rdma_prefix.clear();
+    return;
+  }
+  const RdmaDevice& front = env.rdma_devices.front();
+  env.vendor = front.vendor.empty() ? "unknown" : front.vendor;
+  env.rdma_prefix = rdma_prefix_from_device(front.device);
+}
+
+const RdmaDevice* find_rdma_device(const EnvironmentInfo& env,
+                                   const std::string& name) {
+  if (name.empty()) return nullptr;
+  for (const RdmaDevice& d : env.rdma_devices) {
+    if (d.device == name) return &d;
+  }
+  return nullptr;
+}
+
+std::string mixed_vendor_warning(const EnvironmentInfo& env) {
+  // vendor -> its devices, in first-seen order so the rank's HCA leads.
+  std::vector<std::pair<std::string, std::vector<std::string>>> groups;
+  for (const RdmaDevice& d : env.rdma_devices) {
+    const std::string v = d.vendor.empty() ? "unknown" : d.vendor;
+    auto it = std::find_if(groups.begin(), groups.end(),
+                           [&](const auto& g) { return g.first == v; });
+    if (it == groups.end()) {
+      groups.push_back({v, {}});
+      it = groups.end() - 1;
+    }
+    it->second.push_back(d.device);
+  }
+  if (groups.size() < 2) return std::string();
+  std::string msg = "RDMA devices from more than one NIC vendor on this node:";
+  for (std::size_t i = 0; i < groups.size(); ++i) {
+    msg += (i ? "; " : " ") + groups[i].first + ":";
+    for (const std::string& dev : groups[i].second) msg += " " + dev;
+  }
+  msg += "; using " + env.vendor + " (the vendor of this rank's HCA " +
+         env.rdma_devices.front().device + ")";
+  return msg;
 }
 
 
@@ -925,6 +982,11 @@ std::string EnvironmentInfo::to_kv() const {
     out << p << "gid_index=" << TestResult::int_to_chars(d.gid_index) << "\n";
     out << p << "gid_type=" << kv_safe(d.gid_type) << "\n";
     out << p << "port_state=" << kv_safe(d.port_state) << "\n";
+    out << p << "pci_vendor=" << kv_safe(d.pci_vendor) << "\n";
+    out << p << "pci_device=" << kv_safe(d.pci_device) << "\n";
+    out << p << "pci_subsystem_device=" << kv_safe(d.pci_subsystem_device) << "\n";
+    out << p << "vendor=" << kv_safe(d.vendor) << "\n";
+    out << p << "vendor_source=" << kv_safe(d.vendor_source) << "\n";
     out << p << "vendor_id=" << TestResult::int_to_chars(d.vendor_id) << "\n";
     out << p << "vendor_part_id=" << TestResult::int_to_chars(d.vendor_part_id)
         << "\n";
@@ -1060,6 +1122,11 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
       else if (field == "gid_index") d.gid_index = to_int(val, -1);
       else if (field == "gid_type")  d.gid_type = val;
       else if (field == "port_state") d.port_state = val;
+      else if (field == "pci_vendor") d.pci_vendor = val;
+      else if (field == "pci_device") d.pci_device = val;
+      else if (field == "pci_subsystem_device") d.pci_subsystem_device = val;
+      else if (field == "vendor")    d.vendor = val;
+      else if (field == "vendor_source") d.vendor_source = val;
       else if (field == "vendor_id") d.vendor_id = to_int(val, -1);
       else if (field == "vendor_part_id") d.vendor_part_id = to_int(val, -1);
       // unknown rdma fields ignored

@@ -319,19 +319,25 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
   `gpu<2`, `sym:hipStreamGetId`, `!sym:libionic` (`;`-join = AND).
 - `expected` (`KNOWN_FAILURE` only): the expected reduced status (default `fail`).
 - A missing policy for the detected platform (`<gpu>_<nic>.csv`, then `<nic>.csv`)
-  => **discovery mode** (all tests `MUST_PASS`, gate active) — the seed for a new
-  platform file.
+  => an `ERROR` line listing the paths tried, then **discovery mode** (all tests
+  `MUST_PASS`, gate active) — the seed for a new platform file. `<nic>` comes
+  from the PCI vendor ID of the rank's HCA, not its device name.
 
 ### Report (`report.json`)
 
-The machine artifact (`schema_version: "1.3"`). Top level: `harness`
+The machine artifact (`schema_version: "1.4"`). Top level: `harness`
 (`{version, git_sha}` — the build-time harness version and git SHA, also
 printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
-e.g. from a source tarball), `mode`, `launch` (`{np, ppn, hosts}` — the run's
-`-n` / `-ppn` / `-hosts` shape), `summary` counts, per-node `environment`
-and `topology` (`{hca, gpu, hca_source, gpu_source, local, note}` — the NIC
-and HIP GPU the rank used, each source `user` / `affinity` / `default`, `local`
-when the NIC is the GPU's nearest, and `note` why a fallback was taken),
+e.g. from a source tarball), `mode`, `policy` (`{path, selected_by, key,
+gpu_key, nic_key, tried}` — the policy file in use, `null` in discovery mode,
+and how it was chosen: `policy` / `vendor` / `auto`), `launch` (`{np, ppn,
+hosts}` — the run's `-n` / `-ppn` / `-hosts` shape), `summary` counts, per-node
+`environment` (each `rdma_devices[]` entry carries its `vendor`,
+`vendor_source` and PCI IDs `pci_vendor` / `pci_device` /
+`pci_subsystem_device`) and `topology` (`{hca, hca_vendor, gpu, hca_source,
+gpu_source, local, note}` — the NIC and HIP GPU the rank used, each source
+`user` / `affinity` / `default`, `local` when the NIC is the GPU's nearest, and
+`note` why a fallback was taken),
 and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
 perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
 `perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.

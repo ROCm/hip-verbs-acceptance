@@ -114,10 +114,29 @@ The policy file is chosen by this priority:
    uses `<gpu>.csv` (e.g. `mi350.csv`; `gpu.csv` for an unmapped arch), else
    discovery; a host with neither uses `synthetic.csv`.
 
-If the resolved file is missing **and it was auto-selected** (cases 2-3 by default
-dir), the suite enters discovery mode: a `WARN`, then all tests run as `MUST_PASS`.
-If `--policy <file>` names a file that does not exist, that is a hard error (typo
-guard), not discovery.
+**NIC vendor detection.** Each RDMA device's vendor comes from its PCI vendor
+ID, `/sys/class/infiniband/<dev>/device/vendor`: `0x15b3` -> `connectx`,
+`0x14e4` -> `thor`, `0x1dd8` -> `ionic`, anything else or unreadable ->
+`unknown`. The device name is not used, so renamed devices (`rdma0`,
+`rocep65s0f0`) are detected correctly. Each device in the report records
+`vendor`, `vendor_source` (`pci`, or `none` when the ID was unreadable),
+`pci_vendor`, `pci_device` and `pci_subsystem_device` (the last two identify
+the NIC model and are not used for the lookup). `<nic>` is the vendor of
+**this rank's HCA** (`--hca`, or the GPU's nearest NIC); if the node's other
+RDMA devices have a different vendor, a `WARN` lists the devices per vendor.
+
+If the resolved file is missing in cases 2-3 (default dir), the suite enters
+discovery mode: all tests run as `MUST_PASS`. With `--vendor` that is a `WARN`;
+with auto-selection it is an `ERROR` line naming the detected keys and every
+path tried (`ERROR: no policy for gpu=... nic=... (tried: ...)`), the summary
+reads `mode=discovery (no policy)`, and `report.json` `policy.path` is `null`.
+The exit code is still the gate verdict. If `--policy <file>` names a file that
+does not exist, that is a hard error (typo guard), not discovery.
+
+The run header prints the policy in use (`policy: <path> (auto: gpu=... nic=...)`,
+or `policy: none, discovery mode (...)`), and `report.json` records it in the
+top-level `policy` object: `path`, `selected_by` (`policy` / `vendor` /
+`auto`), `key`, `gpu_key` / `nic_key` (auto only) and `tried`.
 
 ## Shipped policies
 

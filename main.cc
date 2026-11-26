@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -563,6 +564,18 @@ std::string prepare_test(const TestMeta& meta) {
   return set_current_gpu(topology::get_rank_gpu());
 }
 
+// One run-header line for the rank's HCA, e.g. "rdma0 vendor=ionic (pci
+// 0x1dd8:0x1002, subsystem 0x5201)". "" when the rank has no HCA.
+std::string format_hca(const EnvironmentInfo& env) {
+  const RdmaDevice* d = find_rdma_device(env, env.rank_pair.hca);
+  if (d == nullptr) return "";
+  std::string s = d->device + " vendor=" + (d->vendor.empty() ? "unknown" : d->vendor);
+  if (d->vendor_source != "pci") return s + " (no PCI vendor ID)";
+  s += " (pci " + d->pci_vendor + ":" + (d->pci_device.empty() ? "?" : d->pci_device);
+  if (!d->pci_subsystem_device.empty()) s += ", subsystem " + d->pci_subsystem_device;
+  return s + ")";
+}
+
 // Resolve this rank's GPU and HCA (detect()), say why if a fallback was
 // taken, make the GPU current, and publish the pair for
 // topology::get_rank_hca() / get_rank_gpu() and the --exec children. Only for processes that run tests: a launcher's resolved
@@ -572,12 +585,17 @@ std::string prepare_test(const TestMeta& meta) {
 // (after an error line) when an explicit --hca / --device is not on this host
 // or the GPU can't be made current.
 bool apply_topology(const Options& opt, bool worker) {
-  const topology::Pair& pair = environment().rank_pair;
+  const EnvironmentInfo& env = environment();
+  const topology::Pair& pair = env.rank_pair;
   if (!opt.quiet) {
     const std::string who = worker ? "rank " + std::to_string(opt.rank) + ": " : "";
     std::fprintf(stderr, "topology: %s%s\n", who.c_str(),
                  topology::format_pair(pair).c_str());
+    if (const std::string hca = format_hca(env); !hca.empty())
+      std::fprintf(stderr, "hca: %s%s\n", who.c_str(), hca.c_str());
   }
+  if (const std::string mixed = mixed_vendor_warning(env); !mixed.empty())
+    std::fprintf(stderr, "WARN: %s\n", mixed.c_str());
   if (!pair.note.empty()) std::fprintf(stderr, "note: %s\n", pair.note.c_str());
   if (!pair.error.empty()) {
     std::fprintf(stderr, "error: %s\n", pair.error.c_str());
@@ -738,60 +756,105 @@ std::string gpu_platform_key(const std::string& gpu_model) {
 //     (e.g. mi350_thor.csv), else fall back to <nic>.csv, else discovery.
 //     With GPUs but no known NIC: <gpu>.csv (e.g. mi350.csv; gpu.csv for an
 //     unmapped arch), else discovery. With neither: synthetic.csv.
-std::string resolve_vendor(const Options& opt) {
-  if (!opt.vendor.empty()) return opt.vendor;
-  const EnvironmentInfo& env = environment();
-  const std::string& v = env.vendor;
-  const std::string gpu = gpu_platform_key(env.gpu_model);
-  if (v == "connectx" || v == "thor" || v == "ionic") {
-    if (!gpu.empty()) {
-      const std::string combined = gpu + "_" + v;  // e.g. "mi350_ionic"
-      std::ifstream probe(binary_dir() + "/policy/" + combined + ".csv");
-      if (probe.good()) return combined;  // platform-specific policy present
+// `key` is the policy key (forwarded to workers as --vendor); `path` is the
+// file to load, which may not exist (load_policy_or_fail() handles that).
+ReportInputs::PolicyInfo resolve_policy(const Options& opt) {
+  ReportInputs::PolicyInfo p;
+  const std::string dir = binary_dir() + "/policy/";
+  std::vector<std::string> probed;
+  if (!opt.vendor.empty()) {
+    p.key = opt.vendor;
+  } else {
+    const EnvironmentInfo& env = environment();
+    const std::string& v = env.vendor;
+    const std::string gpu = gpu_platform_key(env.gpu_model);
+    p.gpu_key = gpu;
+    p.nic_key = v;
+    if (v == "connectx" || v == "thor" || v == "ionic") {
+      p.key = v;  // the bare NIC policy (or discovery if absent)
+      if (!gpu.empty()) {
+        const std::string combined = gpu + "_" + v;  // e.g. "mi350_ionic"
+        probed.push_back(dir + combined + ".csv");
+        if (std::ifstream(probed.back()).good()) p.key = combined;
+      }
+    } else if (env.gpu_count > 0 || !env.gpu_devices.empty()) {
+      // A GPU-only host must not land on synthetic.csv: it lists no real test,
+      // so every HIP test would be silently excluded.
+      p.key = gpu.empty() ? "gpu" : gpu;
+    } else {
+      p.key = "synthetic";
     }
-    return v;  // fall back to the bare NIC policy (or discovery if absent)
   }
-  // A GPU-only host must not land on synthetic.csv: it lists no real test,
-  // so every HIP test would be silently excluded.
-  if (env.gpu_count > 0 || !env.gpu_devices.empty()) return gpu.empty() ? "gpu" : gpu;
-  return "synthetic";
+  p.path = opt.policy.empty() ? dir + p.key + ".csv" : opt.policy;
+  if (!opt.policy.empty() || !opt.vendor.empty()) {
+    p.selected_by = opt.policy.empty() ? "vendor" : "policy";
+    p.gpu_key.clear();
+    p.nic_key.clear();
+    p.tried = {p.path};
+  } else {
+    p.selected_by = "auto";
+    p.tried = probed;
+    if (p.tried.empty() || p.tried.back() != p.path) p.tried.push_back(p.path);
+  }
+  return p;
 }
 
-// Resolve the policy file path from options + vendor. Always returns a non-empty
-// path; the file may or may not exist. Policy::load() handles the missing-file
-// case by returning present=false (discovery), which load_policy_or_fail() turns
-// into a WARN + all-MUST_PASS run.
-std::string resolve_policy_path(const Options& opt, const std::string& vendor) {
-  if (!opt.policy.empty()) return opt.policy;
-  return binary_dir() + "/policy/" + vendor + ".csv";
+std::string join(const std::vector<std::string>& v, const char* sep) {
+  std::string out;
+  for (const std::string& s : v) out += (out.empty() ? "" : sep) + s;
+  return out;
 }
 
-bool load_policy_or_fail(const Options& opt, const std::string& vendor,
+// Load the policy `p` names. A missing file means discovery: `p.path` is
+// cleared and a missing auto-selected file is reported as an ERROR, since on
+// known hardware it means detection went wrong.
+bool load_policy_or_fail(const Options& opt, ReportInputs::PolicyInfo& p,
                          Policy& out, int& rc) {
-  const std::string path = resolve_policy_path(opt, vendor);
   try {
-    out = Policy::load(path, opt.policy_explicit);
+    out = Policy::load(p.path, opt.policy_explicit);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "error: %s\n", ex.what());
     rc = 2;
     return false;
   }
   if (!out.present) {
-    // No policy file → WARN and run all as MUST_PASS with gate active.
-    std::fprintf(stderr,
-                 "WARN: no policy file found for vendor '%s' (tried: %s); "
-                 "running all registered tests as MUST_PASS (gate active).\n",
-                 vendor.c_str(), path.c_str());
+    if (p.selected_by == "auto") {
+      const EnvironmentInfo& env = environment();
+      const std::string arch = env.gpu_model.substr(0, env.gpu_model.find(':'));
+      std::string gpu = p.gpu_key.empty() ? arch : p.gpu_key + " (" + arch + ")";
+      if (gpu.empty()) gpu = "none";
+      std::fprintf(stderr,
+                   "ERROR: no policy for gpu=%s nic=%s (tried: %s); running all "
+                   "tests as MUST_PASS. Pass --policy or --vendor.\n",
+                   gpu.c_str(), p.nic_key.c_str(), join(p.tried, ", ").c_str());
+    } else {
+      std::fprintf(stderr,
+                   "WARN: no policy file found for vendor '%s' (tried: %s); "
+                   "running all registered tests as MUST_PASS (gate active).\n",
+                   p.key.c_str(), p.path.c_str());
+    }
+    p.path.clear();
   }
   return true;
 }
 
+// The run-header line naming the policy in effect.
+void print_policy_header(const ReportInputs::PolicyInfo& p) {
+  std::string how = p.selected_by == "policy" ? "--policy"
+                    : p.selected_by == "vendor" ? "--vendor " + p.key
+                    : "auto: gpu=" + (p.gpu_key.empty() ? std::string("none") : p.gpu_key) +
+                          " nic=" + p.nic_key;
+  std::fprintf(stderr, "policy: %s (%s)\n",
+               p.path.empty() ? "none, discovery mode" : p.path.c_str(), how.c_str());
+}
+
 std::vector<TestMeta> fill_report_selection(const Options& opt,
-                                            const std::string& vendor,
+                                            const ReportInputs::PolicyInfo& policy,
                                             bool discovery,
                                             bool exclude_two_node,
                                             ReportInputs& in) {
-  in.vendor = vendor;
+  in.vendor = policy.key;
+  in.policy = policy;
   in.discovery = discovery;
   in.quiet = opt.quiet;
   in.perf_csv = opt.perf_csv;
@@ -868,11 +931,12 @@ Partition classify_and_partition(const std::vector<TestMeta>& selected,
 }
 
 int do_run(const Options& opt) {
-  const std::string vendor = resolve_vendor(opt);
+  ReportInputs::PolicyInfo selection = resolve_policy(opt);
   Policy policy;
   int rc = 0;
-  if (!load_policy_or_fail(opt, vendor, policy, rc)) return rc;
+  if (!load_policy_or_fail(opt, selection, policy, rc)) return rc;
   const bool discovery = !policy.present;
+  if (!opt.quiet && !opt.lint) print_policy_header(selection);
 
   // --lint: cross-reference registry against policy; print unlisted tests.
   if (opt.lint) {
@@ -897,7 +961,7 @@ int do_run(const Options& opt) {
 
   ReportInputs in;
   const std::vector<TestMeta> selected =
-      fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/true, in);
+      fill_report_selection(opt, selection, discovery, /*exclude_two_node=*/true, in);
   const Partition part = classify_and_partition(selected, policy, opt, environment());
   note_two_rank_tests(opt, 1);
 
@@ -1077,12 +1141,12 @@ int do_worker(const Options& opt) {
     }
   }
 
-  const std::string vendor = resolve_vendor(opt);
+  ReportInputs::PolicyInfo selection = resolve_policy(opt);
 
   // Load policy for isolation only; gating happens in the launcher Reporter.
   Policy policy;
   int rc = 0;
-  if (!load_policy_or_fail(opt, vendor, policy, rc)) return rc;
+  if (!load_policy_or_fail(opt, selection, policy, rc)) return rc;
   const bool discovery = !policy.present;
 
   const std::vector<TestMeta> selected =
@@ -1263,7 +1327,7 @@ int do_launch(const Options& opt) {
     rendezvous = host0 + ":" + std::to_string(opt.port);
   }
 
-  const std::string vendor = resolve_vendor(opt);
+  ReportInputs::PolicyInfo selection = resolve_policy(opt);
 
   // Remote binary: default to our own absolute path (same-path/NFS assumption).
   // Local ranks always exec /proc/self/exe.
@@ -1317,7 +1381,7 @@ int do_launch(const Options& opt) {
   specs.reserve(plan.size());
   for (const RankPlacement& p : plan) {
     const std::vector<std::string> args =
-        build_worker_args(wp, p, size, rendezvous, vendor);
+        build_worker_args(wp, p, size, rendezvous, selection.key);
     SshRank s;
     s.rank = p.rank;
     s.node = p.host;
@@ -1392,14 +1456,14 @@ int do_launch(const Options& opt) {
   // Load policy for reconciliation/gating (the launcher gates, not the workers).
   Policy policy;
   int rc = 0;
-  if (!load_policy_or_fail(opt, vendor, policy, rc)) return rc;
+  if (!load_policy_or_fail(opt, selection, policy, rc)) return rc;
   const bool discovery = !policy.present;
 
   // A 2-rank run keeps TwoNode tests; any other size excludes them (they need
   // exactly 2 ranks). Mirror the worker's selection scope so the denominator and
   // the synthesized NA set match what actually ran.
   ReportInputs in;
-  fill_report_selection(opt, vendor, discovery, /*exclude_two_node=*/size != 2, in);
+  fill_report_selection(opt, selection, discovery, /*exclude_two_node=*/size != 2, in);
   // Placeholder envs: load_rank_results_text() replaces each with the
   // worker's @env block.
   for (const auto& c : children)
@@ -1421,15 +1485,24 @@ int do_launch(const Options& opt) {
 
   // Workers' stderr is only shown on failure, so print each rank's pair (from
   // its @env block) ahead of the per-test lines.
-  if (!opt.quiet) {
-    for (const auto& n : in.nodes) {
-      const topology::Pair& pair = n.environment.rank_pair;
+  std::set<std::string> mixed_hosts;  // one mixed-vendor WARN per host
+  for (const auto& n : in.nodes) {
+    const topology::Pair& pair = n.environment.rank_pair;
+    if (!opt.quiet) {
       std::fprintf(stderr, "topology: rank %d on %s: %s\n", n.rank, n.host.c_str(),
                    topology::format_pair(pair).c_str());
-      if (!pair.note.empty())
-        std::fprintf(stderr, "note: rank %d: %s\n", n.rank, pair.note.c_str());
+      if (const std::string hca = format_hca(n.environment); !hca.empty())
+        std::fprintf(stderr, "hca: rank %d on %s: %s\n", n.rank, n.host.c_str(),
+                     hca.c_str());
     }
+    if (const std::string mixed = mixed_vendor_warning(n.environment);
+        !mixed.empty() && mixed_hosts.insert(n.host).second)
+      std::fprintf(stderr, "WARN: rank %d on %s: %s\n", n.rank, n.host.c_str(),
+                   mixed.c_str());
+    if (!opt.quiet && !pair.note.empty())
+      std::fprintf(stderr, "note: rank %d: %s\n", n.rank, pair.note.c_str());
   }
+  if (!opt.quiet) print_policy_header(in.policy);
 
   return finalize_report(opt, policy, in);
 }

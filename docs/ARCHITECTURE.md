@@ -37,7 +37,7 @@ primary signal; performance metrics are collected opt-in via `--kind perf|all`
 > not a "generalization" of the 2-peer probe (§4); (2) cross-rank verdict
 > reconciliation is an explicit Reporter-owned reduction, not an `MPI_Allreduce`
 > (§7.3); (3) an absent policy does not fail new hardware silently — it triggers
-> **discovery mode** (WARN + all tests treated as `MUST_PASS`, gate active), and
+> **discovery mode** (ERROR + all tests treated as `MUST_PASS`, gate active), and
 > tests not listed in a present policy are simply **not run** (§7.2);
 > (4) the process-isolation / EXEC description matches the code and keeps a single
 > result channel (§6.3). Open dependencies are called out in §13.
@@ -267,9 +267,12 @@ to gating decisions.
 
 Detected automatically — never configured:
 
-- **NIC vendor** — from device-name prefix, mapped to a policy key: `mlx5_*` →
-  `connectx`, `bnxt_re*` → `thor`, `ionic_*`/`rdma_*` → `ionic`
-  (`Capability.cpp`). The key selects the policy file (§7).
+- **NIC vendor** — per RDMA device, from its PCI vendor ID
+  (`/sys/class/infiniband/<dev>/device/vendor`), mapped to a policy key:
+  `0x15b3` → `connectx`, `0x14e4` → `thor`, `0x1dd8` → `ionic`, else
+  `unknown` (`Capability.cpp`). Device names are not used (`rdma0`, `rocep*`
+  are vendor-neutral). The vendor of the rank's HCA selects the policy file
+  (§7); a node with mixed vendors gets a `WARN`.
 - **Device / port** — first active RoCE device + port.
 - **gid_index** — selected from the GID table, *not* hardcoded. **Best-effort,
   not authoritative (per review):** the GID-table layout and the RoCEv1/v2
@@ -531,7 +534,9 @@ The suite's #1 use case is onboarding **new hardware/firmware** — precisely th
 case where no policy exists yet. Behaviour by file presence:
 
 - **No `policy/<vendor>.csv` for the detected vendor** (and `--policy` not passed)
-  → **discovery mode**: a loud `WARN` banner, `mode: "discovery"` in the report,
+  → **discovery mode**: a loud `ERROR` line when the file was auto-selected
+  (`WARN` with `--vendor`) naming the detected keys and the paths tried,
+  `mode: "discovery"` in the report and `mode=discovery (no policy)` in the summary,
   and **every registered test runs with `MUST_PASS` semantics — the gate stays
   active**. This is stricter than the old "gate-off" discovery: new hardware
   surfaces failures immediately instead of silently collecting outcomes. (A file
@@ -646,12 +651,19 @@ selection filter narrowed the run.
 
 ```jsonc
 {
-  "schema_version": "1.3",
+  "schema_version": "1.4",
   "harness": { "version": "0.1.0", "git_sha": "9133e10-dirty" },
                                                 // build-time harness version + git SHA;
                                                 // git_sha is "unknown" for a build with
                                                 // no .git (e.g. a source tarball)
   "mode": "gate",                              // gate | discovery
+  "policy": {                                  // how the policy file was chosen
+    "path": "/opt/hva/policy/mi350_thor.csv",  // null when none was found (discovery)
+    "selected_by": "auto",                     // policy (--policy) | vendor (--vendor) | auto
+    "key": "mi350_thor",
+    "gpu_key": "mi350", "nic_key": "thor",     // auto only, else null
+    "tried": ["/opt/hva/policy/mi350_thor.csv"] // candidate files, in lookup order
+  },
   "filtered": false,                           // true when --filter*/--kind narrowed the run
   "launch": { "np": 2, "ppn": 1, "hosts": ["node-a", "node-b"] },
                                                 // -n / -ppn / -hosts shape of the run
@@ -670,13 +682,16 @@ selection filter narrowed the run.
         "rdma_devices": [
           { "device": "bnxt_re0", "netdev": "…", "fw_ver": "…", "board_id": "…",
             "node_guid": "…", "gid_index": 3, "gid_type": "RoCEv2",
-            "vendor_id": null, "vendor_part_id": null }
+            "vendor": "thor",                  // from pci_vendor; unknown if unmapped
+            "vendor_source": "pci",            // pci | none (vendor ID unreadable)
+            "pci_vendor": "0x14e4", "pci_device": "0x1760", "pci_subsystem_device": "0x…",
+            "vendor_id": null, "vendor_part_id": null }   // ibverbs builds only
         ],
         "gpu_devices": [ { "ordinal": 0, "hip_ordinal": 0, "bdf": "…", "numa_node": 0, "arch": "gfx…" } ],
         "gpu_nic_affinity": [ { "gpu": 0, "nearest_nic": "bnxt_re0", "ambiguous": false } ]
       },
       "topology": {                            // the GPU / NIC this rank used
-        "hca": "bnxt_re0", "gpu": 0,
+        "hca": "bnxt_re0", "hca_vendor": "thor", "gpu": 0,
         "hca_source": "affinity", "gpu_source": "default",  // user | affinity | default
         "local": true,                         // hca is the gpu's nearest NIC
         "note": null                           // why a fallback was taken
@@ -844,7 +859,7 @@ hva -n <n> [-ppn <p>] [-hosts h1,h2]  # multi-rank launcher (local, ssh or srun)
            [--policy ./policy/thor.csv]     # direct path to policy CSV; auto-selected from
                                             # <binary_dir>/policy/<gpu>_<nic>.csv → <nic>.csv
                                             # (no NIC: <gpu>.csv);
-                                            # missing → WARN + all MUST_PASS (gate active)
+                                            # missing → ERROR + all MUST_PASS (gate active)
            [--vendor <name>]                # override vendor auto-detection
            [--report ./report.json]         # always the full report (no --verbose)
            [--results-out <path|->]         # worker result file (- = stdout)
@@ -914,10 +929,11 @@ channel is the harness's own key=value `TestResult` file, JSON only in the merge
 
 **Open dependencies (block specific functionality, not the harness):**
 
-- **New NIC device-name prefixes.** The vendor key is derived from the ibverbs
-  device-name prefix (`mlx5_`→connectx, `bnxt_re`→thor, `ionic_`/`rdma_`→ionic,
-  `Capability.cpp`). A NIC whose prefix is not yet mapped runs in **discovery
-  mode** (all `MUST_PASS`, §7.2). *Action:* confirm the prefix and add the rule.
+- **New NIC vendors.** The vendor key comes from the PCI vendor ID of the
+  rank's HCA (`0x15b3`→connectx, `0x14e4`→thor, `0x1dd8`→ionic,
+  `nic_vendor_from_pci()` in `Capability.cpp`); the device name is not used. A
+  NIC whose vendor ID is not yet mapped is `unknown` and runs in **discovery
+  mode** (all `MUST_PASS`, §7.2) with an `ERROR` line. *Action:* add the ID.
 - **gid_index selection is best-effort across vendors** (§5) — needs validation
   on each target NIC; the `--gid <index>` override is the escape hatch.
 

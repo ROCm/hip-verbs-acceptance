@@ -604,6 +604,19 @@ for n in nodes:
     if not rdma or rdma[0].get("device") != "bnxt_re0":
         errs.append("rank %r rdma_devices missing bnxt_re0: %r"
                     % (n.get("rank"), rdma))
+    else:
+        want_pci = {"vendor": "thor", "vendor_source": "pci", "pci_vendor": "0x14e4",
+                    "pci_device": "0x1760", "pci_subsystem_device": "0x0000"}
+        got_pci = {k: rdma[0].get(k) for k in want_pci}
+        if got_pci != want_pci:
+            errs.append("rank %r rdma_devices[0] PCI fields=%r expected %r"
+                        % (n.get("rank"), got_pci, want_pci))
+    if n.get("topology", {}).get("hca_vendor") != "thor":
+        errs.append("rank %r topology.hca_vendor=%r expected 'thor'"
+                    % (n.get("rank"), n.get("topology", {}).get("hca_vendor")))
+pol = rep.get("policy", {})
+if pol.get("selected_by") != "policy" or not (pol.get("path") or "").endswith("synthetic.csv"):
+    errs.append("policy=%r expected selected_by policy, path .../synthetic.csv" % pol)
     # M1c: symbols map present with the fake-env hsa probe true.
     syms = env.get("symbols")
     if not isinstance(syms, dict):
@@ -853,7 +866,7 @@ fi
 # ===========================================================================
 # Check (n): --version prints a non-empty harness version and git SHA, and
 # report.json carries the same two values in a top-level "harness" object
-# (additive; schema_version "1.3").
+# (additive; schema_version "1.4").
 # ===========================================================================
 LOG_N="$TMP/version.log"
 run_bin "$LOG_N" --version
@@ -882,8 +895,8 @@ import json, sys
 with open(sys.argv[1]) as f:
     rep = json.load(f)
 errs = []
-if rep.get("schema_version") != "1.3":
-    errs.append("schema_version=%r expected '1.3'" % rep.get("schema_version"))
+if rep.get("schema_version") != "1.4":
+    errs.append("schema_version=%r expected '1.4'" % rep.get("schema_version"))
 # A single in-process rank still records its launch shape.
 if rep.get("launch") != {"np": 1, "ppn": 1, "hosts": ["localhost"]}:
     errs.append("launch=%r expected {np:1, ppn:1, hosts:[localhost]}" % rep.get("launch"))
@@ -900,7 +913,7 @@ if errs:
 sys.exit(0)
 PYEOF
   if [ $? -eq 0 ]; then
-    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.3, launch{}"
+    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.4, launch{}"
   else
     fail "harness block in report.json" "$(cat "$TMP/n_out.txt")"
   fi
@@ -1323,13 +1336,13 @@ import json, sys
 errs = []
 def sel(path):
     return [n.get("topology") for n in json.load(open(path)).get("nodes", [])]
-want = [{"hca": "bnxt_re0", "gpu": 0, "hca_source": "affinity",
+want = [{"hca": "bnxt_re0", "hca_vendor": "thor", "gpu": 0, "hca_source": "affinity",
          "gpu_source": "user", "local": True, "note": None},
-        {"hca": "bnxt_re1", "gpu": 4, "hca_source": "affinity",
+        {"hca": "bnxt_re1", "hca_vendor": "thor", "gpu": 4, "hca_source": "affinity",
          "gpu_source": "user", "local": True, "note": None}]
 if sel(sys.argv[1]) != want:
     errs.append("-n 2 --device 0,4: %r" % sel(sys.argv[1]))
-want = [{"hca": "bnxt_re1", "gpu": 4, "hca_source": "user",
+want = [{"hca": "bnxt_re1", "hca_vendor": "thor", "gpu": 4, "hca_source": "user",
          "gpu_source": "affinity", "local": True, "note": None}]
 if sel(sys.argv[2]) != want:
     errs.append("--hca bnxt_re1: %r" % sel(sys.argv[2]))
@@ -1403,6 +1416,62 @@ else
   else
     pass "host by address is local (-hosts 127.0.0.1,$SELF_IP: both ranks fork/exec'd)"
   fi
+fi
+
+# ===========================================================================
+# Check (z): auto-selected policy (no --policy, no --vendor) on the fake env
+# (vendor thor from PCI ID 0x14e4, no mapped GPU key, so the lookup is
+# <binary_dir>/policy/thor.csv). A copy of the binary in a scratch dir controls
+# what policy/ holds. Missing: an ERROR line naming the keys and the path
+# tried, discovery mode in the summary and report.json `policy`, exit code
+# still the gate verdict (syn_pass passes -> 0). Present: gate mode, no ERROR.
+# ===========================================================================
+AUTO_DIR="$TMP/auto"
+mkdir -p "$AUTO_DIR/policy"
+cp "$BIN" "$AUTO_DIR/hva"
+LOG_Z1="$TMP/auto_missing.log"
+REP_Z1="$TMP/rep_auto_missing.json"
+( ACCEPT_FAKE_ENV=1 "$AUTO_DIR/hva" --filter syn_pass --report "$REP_Z1" >"$LOG_Z1" 2>&1 )
+RC_Z1=$?
+cp "$POLICY/synthetic.csv" "$AUTO_DIR/policy/thor.csv"
+LOG_Z2="$TMP/auto_present.log"
+REP_Z2="$TMP/rep_auto_present.json"
+( ACCEPT_FAKE_ENV=1 "$AUTO_DIR/hva" --filter syn_pass --report "$REP_Z2" >"$LOG_Z2" 2>&1 )
+RC_Z2=$?
+Z_TRIED="$AUTO_DIR/policy/thor.csv"
+if [ "$RC_Z1" -ne 0 ] || [ "$RC_Z2" -ne 0 ]; then
+  fail "auto-selected policy" "exit codes $RC_Z1/$RC_Z2 (want 0/0: syn_pass passes)"
+  cat "$LOG_Z1" "$LOG_Z2"
+elif ! grep -qxF "ERROR: no policy for gpu=gfx-fake nic=thor (tried: $Z_TRIED); running all tests as MUST_PASS. Pass --policy or --vendor." "$LOG_Z1" ||
+     ! grep -qF 'report: mode=discovery (no policy) | ' "$LOG_Z1" ||
+     ! grep -qxF 'policy: none, discovery mode (auto: gpu=none nic=thor)' "$LOG_Z1" ||
+     ! grep -qxF 'hca: bnxt_re0 vendor=thor (pci 0x14e4:0x1760, subsystem 0x0000)' "$LOG_Z1"; then
+  fail "auto-selected policy" "missing ERROR / summary / header line when no policy is found"
+  cat "$LOG_Z1"
+elif grep -q '^ERROR:' "$LOG_Z2" ||
+     ! grep -qxF "policy: $Z_TRIED (auto: gpu=none nic=thor)" "$LOG_Z2"; then
+  fail "auto-selected policy" "auto-selected thor.csv not reported as the policy in use"
+  cat "$LOG_Z2"
+elif ! "$PY" - "$REP_Z1" "$REP_Z2" "$Z_TRIED" <<'PYEOF' >"$TMP/z_out.txt" 2>&1
+import json, sys
+errs = []
+tried = sys.argv[3]
+missing = json.load(open(sys.argv[1]))
+present = json.load(open(sys.argv[2]))
+want = {"path": None, "selected_by": "auto", "key": "thor", "gpu_key": None,
+        "nic_key": "thor", "tried": [tried]}
+if missing.get("mode") != "discovery" or missing.get("policy") != want:
+    errs.append("missing: mode=%r policy=%r" % (missing.get("mode"), missing.get("policy")))
+want = dict(want, path=tried)
+if present.get("mode") != "gate" or present.get("policy") != want:
+    errs.append("present: mode=%r policy=%r" % (present.get("mode"), present.get("policy")))
+if errs:
+    print("\n".join(errs)); sys.exit(1)
+PYEOF
+then
+  fail "auto-selected policy" "$(cat "$TMP/z_out.txt")"
+else
+  pass "auto-selected policy (missing: ERROR + mode=discovery (no policy) + report policy{}, exit 0; present: gate, policy.path set)"
 fi
 
 # ---------------------------------------------------------------------------

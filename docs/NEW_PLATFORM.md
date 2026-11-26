@@ -30,9 +30,14 @@ flowchart LR
 
 ## 1. Build and run in discovery mode
 
-Do not pass `--policy` or `--vendor`. The NIC vendor is auto-detected; if no
-matching policy file exists, the suite prints a `WARN` and runs everything as
-`MUST_PASS` with the gate active (`mode=discovery` in the report).
+Do not pass `--policy` or `--vendor`. The NIC vendor is auto-detected from the
+PCI vendor ID of the rank's HCA (see
+[POLICY_REFERENCE.md](POLICY_REFERENCE.md#vendor-selection)); if no matching
+policy file exists, the suite prints an `ERROR` line with the detected keys and
+the paths it tried, and runs everything as `MUST_PASS` with the gate active
+(`mode=discovery` in the report). On known hardware that `ERROR` means detection
+went wrong: check the `hca:` header line and `environment.rdma_devices[].vendor`
+before writing a new policy.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -70,9 +75,13 @@ python3 -c 'import json;d=json.load(open("hip_discovery.json"));
 ## 3. Write the policy
 
 Create `policy/<gpu>_<nic>.csv` (e.g. `mi450_thor.csv`): `<gpu>` from the
-gfx->marketing map (gfx950->mi350, gfx942->mi300, ...), `<nic>` the NIC name the
-suite auto-detected, shown in the `WARN` line and in the report
-`environment.vendor`. One row per test:
+gfx->marketing map (gfx950->mi350, gfx942->mi300, ...), `<nic>` the NIC vendor the
+suite auto-detected, shown in the `ERROR` line and in the report
+(`policy.nic_key`, `environment.vendor`). A NIC whose PCI vendor ID is not
+mapped is `unknown`: add its ID to `nic_vendor_from_pci()` in
+`common/Capability.cpp` rather than writing an `unknown` policy. The
+report's `pci_device` / `pci_subsystem_device` identify the exact model. One
+row per test:
 
 ```csv
 # policy/<gpu>_<nic>.csv  — columns: test,class,when,expected,ticket,reason
