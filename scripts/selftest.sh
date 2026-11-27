@@ -620,12 +620,20 @@ for n in nodes:
     if env.get("driver_version") != "0.0-fake":
         errs.append("rank %r environment.driver_version=%r expected '0.0-fake'"
                     % (n.get("rank"), env.get("driver_version")))
+    if env.get("hip_version") != "0.0-fake":
+        errs.append("rank %r environment.hip_version=%r expected '0.0-fake'"
+                    % (n.get("rank"), env.get("hip_version")))
 if errs:
     print("\n".join(errs)); sys.exit(1)
 sys.exit(0)
 PYEOF
-  if [ $? -eq 0 ]; then
-    pass "environment descriptor (fake env: vendor=thor, rocm non-empty, gpu_count=8, symbols/gpu_model/driver_version, homogeneous)"
+  J_PY_RC=$?
+  if [ "$J_PY_RC" -eq 0 ] && grep -q 'ROCm release version unknown' "$LOG_J"; then
+    echo "fake env printed the unknown-ROCm-version ERROR line" >"$TMP/j_out.txt"
+    J_PY_RC=1
+  fi
+  if [ "$J_PY_RC" -eq 0 ]; then
+    pass "environment descriptor (fake env: vendor=thor, rocm non-empty, gpu_count=8, symbols/gpu_model/driver_version/hip_version, homogeneous, no ROCm-version ERROR)"
   else
     fail "environment descriptor (fake env)" "$(cat "$TMP/j_out.txt")"
     cat "$LOG_J"
@@ -853,7 +861,7 @@ fi
 # ===========================================================================
 # Check (n): --version prints a non-empty harness version and git SHA, and
 # report.json carries the same two values in a top-level "harness" object
-# (additive; schema_version "1.3").
+# (additive; schema_version "1.4").
 # ===========================================================================
 LOG_N="$TMP/version.log"
 run_bin "$LOG_N" --version
@@ -882,8 +890,8 @@ import json, sys
 with open(sys.argv[1]) as f:
     rep = json.load(f)
 errs = []
-if rep.get("schema_version") != "1.3":
-    errs.append("schema_version=%r expected '1.3'" % rep.get("schema_version"))
+if rep.get("schema_version") != "1.4":
+    errs.append("schema_version=%r expected '1.4'" % rep.get("schema_version"))
 # A single in-process rank still records its launch shape.
 if rep.get("launch") != {"np": 1, "ppn": 1, "hosts": ["localhost"]}:
     errs.append("launch=%r expected {np:1, ppn:1, hosts:[localhost]}" % rep.get("launch"))
@@ -900,7 +908,7 @@ if errs:
 sys.exit(0)
 PYEOF
   if [ $? -eq 0 ]; then
-    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.3, launch{}"
+    pass "report.json has top-level harness.{version,git_sha}, schema_version 1.4, launch{}"
   else
     fail "harness block in report.json" "$(cat "$TMP/n_out.txt")"
   fi

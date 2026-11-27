@@ -203,6 +203,8 @@ void test_result_io_env_round_trip() {
   env.rocm_version = "6.4.0-fake";
   env.rocm_path = "/opt/rocm-6.4.0";
   env.rocm_version_source = "runtime_info";
+  env.rocm_version_tried = "/a/.info/version, $ROCM_PATH (unset)";
+  env.hip_version = "7.16.60850";
   env.gpu_count = 8;
   env.kernel = "6.6.0";
   env.os = "Ubuntu 22.04";
@@ -266,6 +268,9 @@ void test_result_io_env_round_trip() {
   CHECK_EQ_STR(got_env.rocm_path, "/opt/rocm-6.4.0", "env round-trip: rocm_path");
   CHECK_EQ_STR(got_env.rocm_version_source, "runtime_info",
                "env round-trip: rocm_version_source");
+  CHECK_EQ_STR(got_env.rocm_version_tried, "/a/.info/version, $ROCM_PATH (unset)",
+               "env round-trip: rocm_version_tried");
+  CHECK_EQ_STR(got_env.hip_version, "7.16.60850", "env round-trip: hip_version");
   CHECK(got_env.gpu_count == 8, "env round-trip: gpu_count");
   // M1c scalars round-trip.
   CHECK_EQ_STR(got_env.gpu_model, "gfx942", "env round-trip: gpu_model");

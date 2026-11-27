@@ -579,6 +579,8 @@ bool apply_topology(const Options& opt, bool worker) {
                  topology::format_pair(pair).c_str());
   }
   if (!pair.note.empty()) std::fprintf(stderr, "note: %s\n", pair.note.c_str());
+  if (const std::string err = rocm_version_unknown_error(environment()); !err.empty())
+    std::fprintf(stderr, "%s\n", err.c_str());
   if (!pair.error.empty()) {
     std::fprintf(stderr, "error: %s\n", pair.error.c_str());
     return false;
@@ -1430,6 +1432,10 @@ int do_launch(const Options& opt) {
         std::fprintf(stderr, "note: rank %d: %s\n", n.rank, pair.note.c_str());
     }
   }
+  // Once, for the env the policy's `when` terms are evaluated against.
+  if (const std::string err = rocm_version_unknown_error(pick_predicate_env(in.nodes));
+      !err.empty())
+    std::fprintf(stderr, "%s\n", err.c_str());
 
   return finalize_report(opt, policy, in);
 }

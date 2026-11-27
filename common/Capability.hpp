@@ -79,24 +79,33 @@ struct RdmaDevice {
 struct EnvironmentInfo {
   std::string vendor;       // connectx | thor | ionic | unknown | synthetic
   std::string rdma_prefix;  // mlx5_ | bnxt_re | ionic (from the first device)
-  // ROCm version actually in use, resolved via a priority chain so it matches
-  // the ROCm that hva's HIP dlopen wrapper loaded rather than whatever happens
-  // to sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
-  //   1. "runtime_info"  — directory of the LOADED libamdhip64.so (dlinfo on
-  //                        the wrapper's handle): .info/version in its lib/
-  //                        dir or that dir's parent.
-  //   2. "rocm_path"     — $ROCM_PATH/.info/version (absolute $ROCM_PATH only).
-  //   3. "hip_runtime"   — hipRuntimeGetVersion() decoded (no path known).
-  //   4. "opt_rocm"      — /opt/rocm/.info/version (today's behaviour).
+  // ROCm RELEASE version actually in use (e.g. "10.1.0"; the `rocm` dimension
+  // in `when` predicates), resolved via a priority chain so it matches the
+  // ROCm that hva's HIP dlopen wrapper loaded rather than whatever happens to
+  // sit at /opt/rocm (see resolve_rocm_version() in Capability.cpp):
+  //   1. "rocm_core"     — getROCmVersion() from librocm-core.so.1 (or
+  //                        librocm-core.so) in the LOADED libamdhip64.so's lib/
+  //                        dir (dlinfo on the wrapper's handle).
+  //   2. "runtime_info"  — .info/version in that lib/ dir or its parent.
+  //   3. "rocm_path"     — $ROCM_PATH/.info/version (absolute $ROCM_PATH only).
+  //   4. "opt_rocm"      — /opt/rocm/.info/version.
   //   (none found -> rocm_version empty, rocm_version_source == "none")
-  // Sources 1 and 3 require ACCEPT_HAVE_HIP and a loaded HIP runtime.
+  // Sources 1 and 2 require ACCEPT_HAVE_HIP and a loaded HIP runtime. The HIP
+  // version is never used here: from ROCm 10.x it no longer tracks the release
+  // (ROCm 10.1 ships HIP 7.16), so it is reported separately in hip_version.
   std::string rocm_version;
-  // Root directory the winning source points to (empty for "hip_runtime"/
-  // "none", where no filesystem path is known).
+  // Root directory the winning source points to (empty for "none").
   std::string rocm_path;
-  // Which source above won: "runtime_info" | "rocm_path" | "hip_runtime" |
+  // Which source above won: "rocm_core" | "runtime_info" | "rocm_path" |
   // "opt_rocm" | "none".
   std::string rocm_version_source;
+  // Comma-separated list of what the chain tried, set only when
+  // rocm_version_source == "none" so the launcher can print a rank's
+  // rocm_version_unknown_error(). Carried in the kv block, not in report.json.
+  std::string rocm_version_tried;
+  // hipRuntimeGetVersion() decoded (decode_hip_version), e.g. "7.16.60850".
+  // Informational only: no `when` term reads it. Empty when HIP isn't loaded.
+  std::string hip_version;
   int         gpu_count = 0;
   std::string kernel;       // uname(2) .release
   std::string os;           // PRETTY_NAME from /etc/os-release
@@ -133,6 +142,18 @@ struct EnvironmentInfo {
 // "major.minor.patch". Returns an empty string for a non-positive input. Pure
 // arithmetic, no HIP dependency -- unit-testable without HIP.
 std::string decode_hip_version(int version);
+
+// Format librocm-core's getROCmVersion() triple as "major.minor.patch".
+std::string format_rocm_core_version(unsigned int major, unsigned int minor,
+                                     unsigned int patch);
+
+// The run-header line for an env whose ROCm release version could not be
+// resolved (rocm_version_source == "none"):
+//   "ERROR: ROCm release version unknown (tried: <rocm_version_tried>); rocm
+//   when-terms will not match"
+// Empty for any other env, including the ACCEPT_FAKE_ENV descriptor and a
+// default-constructed one.
+std::string rocm_version_unknown_error(const EnvironmentInfo& env);
 
 // Walk from `start_dir` up through at most `max_levels` parent directories
 // (start_dir itself is level 0) looking for "<dir>/.info/version". Returns the
