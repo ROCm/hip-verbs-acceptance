@@ -51,11 +51,15 @@ Launch_DynShared_FuncAttr,MUST_PASS,,,,
 Kernel_LaunchVariants_Smoke,MUST_PASS,,,,
 GetFuncBySymbol_Resolve,MUST_PASS,,,,
 LaunchKernelEx_ClusterAttrs,MUST_PASS,,,,
-# ROCM-29369: fixed (queue reacquired before coop launch); passes consistently
-# across CI reruns on ROCm 7.0.51831 despite no documented minimum fix version.
+# ROCM-29369: hipLaunchCooperativeKernel SIGSEGVs on a stream whose idle hardware
+# queue the runtime reclaimed. The trigger is dynamic queue reclamation
+# (DEBUG_HIP_DYNAMIC_QUEUES): off by default up to 7.11, on from 7.12. The fix
+# (rocm-systems 0a1e59eb11) first ships in 10.1. Measured on gfx950, 20 runs per
+# release: passes 7.0-7.11, fails 7.12-10.0, passes 10.1 and 10.2.
+Launch_Cooperative_AfterQueueReclaim,KNOWN_FAILURE,rocm>=7.12;rocm<10.1,fail,ROCM-29369,SIGSEGV in hipLaunchCooperativeKernel on a stream whose idle hardware queue the runtime reclaimed
 Launch_Cooperative_AfterQueueReclaim,MUST_PASS,,,ROCM-29369,
 
-# --- Runtime Module Loading ---
+# --- Runtime Module Loading (MORI) ---
 Module_Load_Launch_Lifecycle,MUST_PASS,,,,
 Module_GetGlobal_Resolve,MUST_PASS,,,,
 
@@ -66,7 +70,7 @@ Memcpy_D2D_Sync,MUST_PASS,,,,
 Memcpy_D2D_Async,MUST_PASS,,,,
 Memcpy_D2H_Sync,MUST_PASS,,,,
 Memcpy_D2H_Async,MUST_PASS,,,,
-Memcpy_Size_Sweep,MUST_PASS,,,,
+Memcpy_Size_Sweep,MUST_PASS,,,,sizes 1B..256MiB x H2D/D2H/D2D/P2P sync+async; P2P leg needs >=2 GPUs visible
 Memset_Sync,MUST_PASS,,,,
 Memset_Async,MUST_PASS,,,,
 StreamBatchMemOp_WriteValue,MUST_PASS,rocm>=7.12,,,requires hipStreamBatchMemOp (ROCm >= 7.12)
@@ -83,7 +87,9 @@ HostRegister_Mapped_Uncached,MUST_PASS,,,,
 Capture_Dependency_Update_Chain,MUST_PASS,,,,
 Graph_Capture_AddHostNode,MUST_PASS,,,,
 
-# --- IPC ---
+# --- IPC legacy ---
+# Requires fresh-process isolation (Runner force-isolates the hip/ipc category);
+# passes once the child is exec'd instead of forked from a HIP-dirty worker.
 Ipc_Legacy_GetOpen_RoundTrip,MUST_PASS,,,,
 
 # --- IPC under process density ---
@@ -98,34 +104,38 @@ Ipc_Export_PeerImports_MultiProcess,SKIP,gpu<4,,,needs 4 GPUs for cross-device p
 Ipc_Export_PeerImports_MultiProcess,MUST_PASS,rocm<7.2,,,ROCr below 7.2 does not take the dmabuf IPC path this defect lives in
 Ipc_Export_PeerImports_MultiProcess,KNOWN_FAILURE,,fail,ROCM-29090,hipIpcGetMemHandle fails under multi-process peer-import density (ROCr dmabuf IPC path)
 
-# --- Memory Manager ---
+# --- Memory Manager / VMM ---
 HipMalloc_Free_Integrity,MUST_PASS,,,,
 HostAlloc_Pinned,MUST_PASS,,,,
 Vmm_Granularity,MUST_PASS,,,,
 Vmm_Create_Map_Roundtrip,MUST_PASS,,,,
 Vmm_SetGetAccess,MUST_PASS,,,,
-Vmm_GPUDirectRdmaVmm_Attribute,NA,,,ROCM-2550,requires HIP>=7.2 GPUDirectRDMA+VMM attribute
+Vmm_GPUDirectRdmaVmm_Attribute,MUST_PASS,rocm>=7.2,,ROCM-2550,requires hipDeviceAttributeGPUDirectRDMAWithHipVMMSupported (ROCm >= 7.2)
 Vmm_GpuDirectRDMACapable_MultiMap,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=1
 Vmm_RDMA_MultiMap_NoFlag,MUST_PASS,,,ROCM-2550,16x VMM map gpuDirectRDMACapable=0
 Vmm_Negative_ZeroSize_Unaligned,MUST_PASS,,,,
 Vmm_PosixFd_Export_Import,MUST_PASS,,,,
 Vmm_PosixFd_Import_D2D_Copy,MUST_PASS,,,,
-# ROCM-20991 / ROCM-28090: VMM physical backing is not reclaimed while the VA
-# stays reserved, so both variants leak one buffer per cycle below ROCm 7.13,
-# where the ROCr fix landed. Verified on ROCm 7.0.2.2 / gfx950: +256 MiB/cycle.
-# ROCM-20991: InProcess passes consistently on CI below 7.13 (ROCm 7.0.51831) — promoted to unconditional MUST_PASS.
+# ROCM-20991 (dup ROCM-28090): hipMemUnmap + hipMemRelease does not return the
+# physical backing while the VA stays reserved, so each cycle leaks one buffer
+# (+256 MiB/cycle). The ROCr fix landed in 7.13. Measured on gfx950, 20 runs per
+# release: InProcess passes 7.0.x and 7.1.0, fails 7.1.1-7.12, passes from 7.13.
+# CrossProcess follows the same window but also fails on 7.0.x, which the
+# tickets do not cover.
+Vmm_Reclaim_Cycles_InProcess,KNOWN_FAILURE,rocm>=7.1.1;rocm<7.13,fail,ROCM-20991,VMM release does not reclaim while VA reserved (7.1.1 regression; fixed in 7.13)
 Vmm_Reclaim_Cycles_InProcess,MUST_PASS,,,ROCM-20991,
-Vmm_Reclaim_Cycles_CrossProcess,KNOWN_FAILURE,rocm<7.13,fail,ROCM-20991,cross-process VMM reclaim broken below ROCm 7.13
+Vmm_Reclaim_Cycles_CrossProcess,KNOWN_FAILURE,rocm<7.1,fail,,cross-process VMM reclaim leaks on ROCm 7.0.x (fixed in 7.1.0)
+Vmm_Reclaim_Cycles_CrossProcess,KNOWN_FAILURE,rocm>=7.1.1;rocm<7.13,fail,ROCM-20991,cross-process VMM reclaim broken from 7.1.1 to 7.12
 # In the 7.14 window the reclaim verdict is unreachable: ROCM-27777 breaks the
 # runtime's own cross-process POSIX-fd import, so the importer dies at
 # hipMemSetAccess, which the pre-existing Vmm_PosixFd_Export_Import shows there
 # too. Both bounds are measured, not inferred: 7.13.0 passes all three tests,
-# released 7.14.0 fails, and a later development build passes again.
+# 7.14.0 and 7.14.1 fail, and 10.0 passes again.
 Vmm_Reclaim_Cycles_CrossProcess,SKIP,rocm>=7.14;rocm<7.15,,ROCM-27777,cross-process POSIX-fd import fails at hipMemSetAccess in the ROCM-27777 window
-Vmm_Reclaim_Cycles_CrossProcess,MUST_PASS,rocm>=7.13,,ROCM-20991,
+Vmm_Reclaim_Cycles_CrossProcess,MUST_PASS,,,ROCM-20991,
 Vmm_Map_NoDeadlock_KernelInFlight,KNOWN_FAILURE,,fail,ROCM-25387,hipMemMap behind in-flight null-stream kernel
-Vmm_Fabric_Export_Import,NA,,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
-Vmm_Fabric_Import_D2D_Copy,NA,,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Fabric_Export_Import,MUST_PASS,rocm>=7.12,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
+Vmm_Fabric_Import_D2D_Copy,MUST_PASS,rocm>=7.12,,,requires hipMemHandleTypeFabric (ROCm >= 7.12)
 Vmm_Uncached_Type,MUST_PASS,rocm>=7.0.2,,,requires hipMemAllocationTypeUncached (ROCm >= 7.0.2)
 MallocAsync_FreeAsync,MUST_PASS,,,,
 MemPool_Alloc,MUST_PASS,,,,
@@ -135,23 +145,24 @@ ExtMalloc_FineGrain,MUST_PASS,,,,
 
 # --- Device Management ---
 Device_Query_Basics,MUST_PASS,,,,
-Device_CanAccessPeer_Matrix,MUST_PASS,,,,
-Device_P2P_AllPairs_Copy,MUST_PASS,,,,
-Device_P2P_KernelAccess_AllPairs,MUST_PASS,,,,
+Device_CanAccessPeer_Matrix,MUST_PASS,,,,requires all local GPUs visible (no HIP_VISIBLE_DEVICES subset)
+Device_P2P_AllPairs_Copy,MUST_PASS,,,,all peer-capable GPU pairs, both directions; requires all local GPUs visible
+Device_P2P_KernelAccess_AllPairs,MUST_PASS,,,,in-kernel peer read across all pairs; requires all local GPUs visible
 Device_Attr_Probe,MUST_PASS,,,,
-Hdp_Flush_Ordering,NA,,,,gfx<90a only
+Hdp_Flush_Ordering,NA,,,,gfx<90a only; gfx950 CDNA3+
 DeviceSetLimit_StackSize,MUST_PASS,,,,
-PointerGetAttributes_DeviceVsHost,KNOWN_FAILURE,,fail,ROCM-2696,hipMemGetAddressRange null-arg crash
+# Genuine ROCM-2696 regression: hipMemGetAddressRange SIGSEGVs on a NULL out-param
+# (does not null-check) on ROCm 7.0.2. The test reproduces it; KNOWN_FAILURE keeps
+# the crash isolated and the gate green until the runtime fix lands.
+PointerGetAttributes_DeviceVsHost,KNOWN_FAILURE,,fail,ROCM-2696,hipMemGetAddressRange SIGSEGV on NULL out-param (ROCm 7.0.2)
 DriverEntryPoint_Resolve,MUST_PASS,,,,
 Device_Reset_Mgmt,MUST_PASS,,,,
 
-# --- Library-surfaced HIP-runtime paths ---
+# --- Library-surfaced / HSA interop ---
 Occupancy_Query,MUST_PASS,,,,
-Texture_Object_Lifecycle,NA,,,,no image hw on CDNA3+
+Texture_Object_Lifecycle,NA,,,,no image hw on CDNA3+ (gfx950)
 Mem_Advise_Info,MUST_PASS,,,,
 Memcpy_Symbol,MUST_PASS,,,,
-
-# --- HSA interop ---
 Hsa_MemoryPool_LockHostToPool,MUST_PASS,,,,
 
 # --- HIP + Verbs mixed data-path ---
