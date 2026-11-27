@@ -324,7 +324,7 @@ commas). `#` lines are comments; `test` may be an fnmatch glob. Full guide:
 
 ### Report (`report.json`)
 
-The machine artifact (`schema_version: "1.3"`). Top level: `harness`
+The machine artifact (`schema_version: "1.4"`). Top level: `harness`
 (`{version, git_sha}` — the build-time harness version and git SHA, also
 printed by `hva --version`; `git_sha` is `"unknown"` when built with no `.git`,
 e.g. from a source tarball), `mode`, `launch` (`{np, ppn, hosts}` — the run's
@@ -335,10 +335,15 @@ when the NIC is the GPU's nearest, and `note` why a fallback was taken),
 and `tests[]` with `id, category, class, status, reason, ticket, reduced_from,
 perf, gate_fail, flagged, note, duration_ms`. Under `--kind perf`, each test's
 `perf` map carries `<metric>.{median,min,max,avg,unit,iters,samples}`.
-`environment.rocm_version` is resolved via a priority chain (loaded HIP
-runtime's own tree, then `$ROCM_PATH`, then `hipRuntimeGetVersion()`, then
+`environment.rocm_version` is the ROCm release version, resolved via a
+priority chain (`getROCmVersion()` from the librocm-core next to the loaded
+libamdhip64.so, then that tree's `.info/version`, then `$ROCM_PATH`, then
 `/opt/rocm`); the winning source is recorded in
 `environment.rocm_version_source` and its root in `environment.rocm_path`.
+When no source resolves it, `rocm_version` is `null`, the source is `none`,
+and the run header prints an `ERROR: ROCm release version unknown` line.
+`environment.hip_version` is the decoded `hipRuntimeGetVersion()`,
+informational only (from ROCm 10.x it differs from the release version).
 
 ### Further docs
 

@@ -501,6 +501,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
         << "\n        \"rocm_version\": " << jstr_or_null(env.rocm_version) << ","
         << "\n        \"rocm_path\": "    << jstr_or_null(env.rocm_path) << ","
         << "\n        \"rocm_version_source\": " << jstr_or_null(env.rocm_version_source) << ","
+        << "\n        \"hip_version\": "  << jstr_or_null(env.hip_version) << ","
         << "\n        \"gpu_count\": "    << jnum(static_cast<long long>(env.gpu_count)) << ","
         << "\n        \"kernel\": "       << jstr_or_null(env.kernel) << ","
         << "\n        \"os\": "           << jstr_or_null(env.os) << ","
@@ -584,7 +585,7 @@ int write_report(const Policy& policy, const ReportInputs& in,
   // Assemble the full document.
   std::ostringstream doc;
   doc << "{"
-      << "\n  \"schema_version\": " << jstr("1.3") << ","
+      << "\n  \"schema_version\": " << jstr("1.4") << ","
       << "\n  \"harness\": {"
       << "\n    \"version\": " << jstr(kHarnessVersion) << ","
       << "\n    \"git_sha\": "  << jstr(kGitSha)

@@ -74,12 +74,19 @@ all** (no exact match, no matching glob) is unlisted and not run (see above).
 
 | term | true when |
 |---|---|
-| `rocm>=7.1`, `rocm<7.0`, `rocm>7.0.2` | ROCm version comparison (dotted, zero-padded) |
+| `rocm>=7.1`, `rocm<7.0`, `rocm>7.0.2` | ROCm release version comparison (dotted, zero-padded) |
 | `driver<6.0` | driver version comparison |
 | `fw<100.0` | RDMA firmware version comparison |
 | `gpu<2`, `gpu>=2` | visible GPU count |
 | `sym:hipStreamGetId` | the runtime exports this symbol |
 | `!sym:libionic` | the runtime does NOT export this symbol |
+
+`rocm` terms compare the ROCm **release** version (`environment.rocm_version`,
+e.g. `10.1.0`), never the HIP version: from ROCm 10.x the two diverge (ROCm 10.1
+ships HIP 7.16), and the HIP version is reported only as
+`environment.hip_version`. When the release version can't be determined, every
+`rocm` term is false (the row doesn't apply) and the run header prints
+`ERROR: ROCm release version unknown (tried: …); rocm when-terms will not match`.
 
 Common pattern — require on new stacks, mark NA on old ones:
 

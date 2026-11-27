@@ -7,6 +7,8 @@
 // unit_capability — tests for the pure, HIP-free helpers behind the ROCm
 // version resolution (common/Capability.*):
 //   * decode_hip_version(int) -- HIP_VERSION integer -> "major.minor.patch".
+//   * format_rocm_core_version(major, minor, patch) -- getROCmVersion() triple.
+//   * rocm_version_unknown_error(env) -- the run-header ERROR line.
 //   * find_info_version(start_dir, max_levels) -- walk-up-for-.info/version,
 //     exercised against a temp directory tree created (and removed) here.
 // All are plain filesystem/arithmetic code with no ACCEPT_HAVE_HIP
@@ -40,6 +42,40 @@ void test_decode_hip_version() {
                "decode_hip_version: zero -> empty (no HIP)");
   CHECK_EQ_STR(decode_hip_version(-1), "",
                "decode_hip_version: negative -> empty");
+}
+
+void test_format_rocm_core_version() {
+  CHECK_EQ_STR(format_rocm_core_version(10, 1, 0), "10.1.0",
+               "format_rocm_core_version: 10,1,0 -> 10.1.0");
+  CHECK_EQ_STR(format_rocm_core_version(7, 14, 1), "7.14.1",
+               "format_rocm_core_version: 7,14,1 -> 7.14.1");
+  CHECK_EQ_STR(format_rocm_core_version(4294967295u, 0, 0), "4294967295.0.0",
+               "format_rocm_core_version: UINT_MAX major is not truncated");
+}
+
+void test_rocm_version_unknown_error() {
+  EnvironmentInfo none;
+  none.rocm_version_source = "none";
+  none.rocm_version_tried = "/x/lib/librocm-core.so.1, /opt/rocm/.info/version";
+  CHECK_EQ_STR(rocm_version_unknown_error(none),
+               "ERROR: ROCm release version unknown (tried: "
+               "/x/lib/librocm-core.so.1, /opt/rocm/.info/version); "
+               "rocm when-terms will not match",
+               "rocm_version_unknown_error: source none -> ERROR line");
+
+  EnvironmentInfo found;
+  found.rocm_version = "10.1.0";
+  found.rocm_version_source = "rocm_core";
+  CHECK_EQ_STR(rocm_version_unknown_error(found), "",
+               "rocm_version_unknown_error: resolved version -> no line");
+  CHECK_EQ_STR(rocm_version_unknown_error(EnvironmentInfo{}), "",
+               "rocm_version_unknown_error: default env (no @env block) -> no line");
+
+  ::setenv("ACCEPT_FAKE_ENV", "1", 1);
+  const EnvironmentInfo fake = detect();
+  ::unsetenv("ACCEPT_FAKE_ENV");
+  CHECK_EQ_STR(rocm_version_unknown_error(fake), "",
+               "rocm_version_unknown_error: fake env -> no line");
 }
 
 // Write `content` to `path`, creating parent directories as needed.
@@ -137,6 +173,8 @@ void test_find_info_version() {
 
 void run_capability_tests() {
   test_decode_hip_version();
+  test_format_rocm_core_version();
+  test_rocm_version_unknown_error();
   test_find_info_version();
 }
 

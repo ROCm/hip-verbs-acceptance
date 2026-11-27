@@ -571,11 +571,11 @@ void enrich_ibverbs(EnvironmentInfo& env) {
 #endif
 }
 
-// HIP: record gpu_model and each GPU's HIP ordinal (ACCEPT_HAVE_HIP; no-op
-// otherwise). Queries device properties and PCI bus ids — no kernel
-// launch/alloc. driver_version is NOT set here: the HIP runtime version
-// duplicates rocm_version and is not the KMD driver; detect() reads the amdgpu
-// KMD version from sysfs (dep-free) instead.
+// HIP: record gpu_model, hip_version and each GPU's HIP ordinal
+// (ACCEPT_HAVE_HIP; no-op otherwise). Queries device properties, the runtime
+// version and PCI bus ids — no kernel launch/alloc. driver_version is NOT set
+// here: the HIP runtime version is not the KMD driver; detect() reads the
+// amdgpu KMD version from sysfs (dep-free) instead.
 void enrich_hip(EnvironmentInfo& env) {
 #ifdef ACCEPT_HAVE_HIP
   // HIP entry points resolve at run time through the dlopen wrapper; if the HIP
@@ -596,6 +596,13 @@ void enrich_hip(EnvironmentInfo& env) {
     }
   } catch (const ::acceptance::hipw::MissingSymbol&) {
     // Leave gpu_model unset; best-effort enrichment only.
+  }
+  try {
+    int hip_version = 0;
+    if (hipRuntimeGetVersion(&hip_version) == hipSuccess)
+      env.hip_version = decode_hip_version(hip_version);
+  } catch (const ::acceptance::hipw::MissingSymbol&) {
+    // Leave hip_version unset.
   }
   // HIP ordinals are relative to HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES;
   // match them to the KFD GPUs by PCI BDF. Remap only when at least one GPU
@@ -633,26 +640,84 @@ void enrich_hip(EnvironmentInfo& env) {
 
 // --- ROCm version resolution (priority chain; see Capability.hpp field docs) -
 
+// Each resolver appends what it looked at to `tried`, which only surfaces (as
+// EnvironmentInfo::rocm_version_tried) when every source misses.
+
+// Record ".info/version" in `dir` and up to `max_levels` parents as tried.
+void note_info_version_tried(const std::string& dir, int max_levels,
+                             std::vector<std::string>& tried) {
+  for (int level = 0; level <= max_levels; ++level) {
+    const std::string d = ancestor_dir(dir, level);
+    const std::string path = (d == "/" ? "" : d) + "/.info/version";
+    if (std::find(tried.begin(), tried.end(), path) == tried.end())
+      tried.push_back(path);
+  }
+}
+
 #ifdef ACCEPT_HAVE_HIP
-// Source 1 ("runtime_info"): directory of the LOADED libamdhip64.so, found via
+// lib/ directory of the LOADED libamdhip64.so, found via
 // dlinfo(RTLD_DI_LINKMAP) on the wrapper's dlopen handle (hip_dlopen_handle()).
 // This is the ROCm actually in use regardless of what /opt/rocm or $ROCM_PATH
 // say, which matters under CoCo's wheel stacks (LD_LIBRARY_PATH-only ROCm).
-bool resolve_from_loaded_runtime(EnvironmentInfo& env) {
-  if (!::acceptance::hipw::init_result().hip_lib_loaded) return false;
+// Empty when HIP isn't loaded or dlinfo fails.
+std::string loaded_hip_lib_dir() {
+  if (!::acceptance::hipw::init_result().hip_lib_loaded) return std::string();
   void* handle = ::acceptance::hipw::hip_dlopen_handle();
-  if (handle == nullptr) return false;
+  if (handle == nullptr) return std::string();
   struct link_map* map = nullptr;
   if (::dlinfo(handle, RTLD_DI_LINKMAP, &map) != 0 || map == nullptr ||
       map->l_name == nullptr || map->l_name[0] == '\0') {
-    return false;  // dlinfo unsupported/failed; fall through the chain
+    return std::string();  // dlinfo unsupported/failed; fall through the chain
   }
   const std::string lib_path = map->l_name;
   const std::size_t slash = lib_path.rfind('/');
-  if (slash == std::string::npos) return false;  // no directory component
-  const std::string lib_dir = lib_path.substr(0, slash);
+  if (slash == std::string::npos) return std::string();  // no directory component
+  return lib_path.substr(0, slash);
+}
+
+// Source 1 ("rocm_core"): getROCmVersion() from the librocm-core next to the
+// loaded libamdhip64.so. Opened by absolute path only: a bare-name dlopen could
+// pick up a different ROCm's rocm-core from the search path. getROCmVersion
+// only copies compile-time constants into its out-params.
+bool resolve_from_rocm_core(EnvironmentInfo& env, const std::string& lib_dir,
+                            std::vector<std::string>& tried) {
+  if (lib_dir.empty() || lib_dir[0] != '/') return false;
+  const std::string so1 = lib_dir + "/librocm-core.so.1";
+  const std::string so = lib_dir + "/librocm-core.so";
+  void* h = try_dlopen({so1.c_str(), so.c_str()});
+  if (h == nullptr) {
+    tried.push_back(so1);
+    tried.push_back(so);
+    return false;
+  }
+  using GetROCmVersionFn = int (*)(unsigned int*, unsigned int*, unsigned int*);
+  const auto get_version =
+      reinterpret_cast<GetROCmVersionFn>(::dlsym(h, "getROCmVersion"));
+  unsigned int major = 0, minor = 0, patch = 0;
+  const bool ok = get_version != nullptr && get_version(&major, &minor, &patch) == 0;
+  ::dlclose(h);
+  const std::string version = ok ? format_rocm_core_version(major, minor, patch)
+                                 : std::string();
+  if (!is_version_string(version)) {
+    tried.push_back(so1 + ":getROCmVersion");
+    return false;
+  }
+  env.rocm_path = ancestor_dir(lib_dir, 1);
+  env.rocm_version = version;
+  env.rocm_version_source = "rocm_core";
+  return true;
+}
+
+// Source 2 ("runtime_info"): .info/version in the loaded libamdhip64.so's lib/
+// dir or its parent.
+bool resolve_from_loaded_runtime(EnvironmentInfo& env, const std::string& lib_dir,
+                                 std::vector<std::string>& tried) {
+  if (lib_dir.empty()) return false;
   const auto hit = locate_info_version(lib_dir, kInfoVersionMaxLevels);
-  if (!hit) return false;
+  if (!hit) {
+    note_info_version_tried(lib_dir, kInfoVersionMaxLevels, tried);
+    return false;
+  }
   env.rocm_path = hit->first;
   env.rocm_version = hit->second;
   env.rocm_version_source = "runtime_info";
@@ -660,45 +725,37 @@ bool resolve_from_loaded_runtime(EnvironmentInfo& env) {
 }
 #endif
 
-// Source 2 ("rocm_path"): $ROCM_PATH/.info/version. No ACCEPT_HAVE_HIP needed
+// Source 3 ("rocm_path"): $ROCM_PATH/.info/version. No ACCEPT_HAVE_HIP needed
 // -- this is a plain env var + file read. Only absolute paths are used, so the
 // result never depends on the worker's working directory.
-bool resolve_from_rocm_path_env(EnvironmentInfo& env) {
+bool resolve_from_rocm_path_env(EnvironmentInfo& env,
+                                std::vector<std::string>& tried) {
   const char* rocm_path = std::getenv("ROCM_PATH");
-  if (rocm_path == nullptr || rocm_path[0] != '/') return false;
+  if (rocm_path == nullptr || rocm_path[0] != '/') {
+    tried.push_back(rocm_path == nullptr || rocm_path[0] == '\0'
+                        ? "$ROCM_PATH (unset)"
+                        : "$ROCM_PATH (not absolute)");
+    return false;
+  }
   const auto hit = locate_info_version(rocm_path, 0);
-  if (!hit) return false;
+  if (!hit) {
+    note_info_version_tried(rocm_path, 0, tried);
+    return false;
+  }
   env.rocm_path = hit->first;
   env.rocm_version = hit->second;
   env.rocm_version_source = "rocm_path";
   return true;
 }
 
-#ifdef ACCEPT_HAVE_HIP
-// Source 3 ("hip_runtime"): hipRuntimeGetVersion() decoded. No filesystem path
-// is known from this source, so rocm_path stays empty.
-bool resolve_from_hip_runtime(EnvironmentInfo& env) {
-  if (!::acceptance::hipw::init_result().hip_lib_loaded) return false;
-  try {
-    int hip_version = 0;
-    if (hipRuntimeGetVersion(&hip_version) != hipSuccess) return false;
-    const std::string decoded = decode_hip_version(hip_version);
-    if (decoded.empty()) return false;
-    env.rocm_path.clear();
-    env.rocm_version = decoded;
-    env.rocm_version_source = "hip_runtime";
-    return true;
-  } catch (const ::acceptance::hipw::MissingSymbol&) {
-    return false;  // runtime lacks hipRuntimeGetVersion; fall through
-  }
-}
-#endif
-
 // Source 4 ("opt_rocm"): /opt/rocm/.info/version -- the original hardcoded lookup,
 // kept as the last-resort fallback.
-bool resolve_from_opt_rocm(EnvironmentInfo& env) {
+bool resolve_from_opt_rocm(EnvironmentInfo& env, std::vector<std::string>& tried) {
   const auto hit = locate_info_version("/opt/rocm", 0);
-  if (!hit) return false;
+  if (!hit) {
+    note_info_version_tried("/opt/rocm", 0, tried);
+    return false;
+  }
   env.rocm_path = hit->first;
   env.rocm_version = hit->second;
   env.rocm_version_source = "opt_rocm";
@@ -712,17 +769,24 @@ bool resolve_from_opt_rocm(EnvironmentInfo& env) {
 // init_result().hip_lib_loaded already reflects whether libamdhip64.so loaded;
 // called here right after enrich_hip() for the same reason.
 void resolve_rocm_version(EnvironmentInfo& env) {
+  std::vector<std::string> tried;
 #ifdef ACCEPT_HAVE_HIP
-  if (resolve_from_loaded_runtime(env)) return;
+  const std::string lib_dir = loaded_hip_lib_dir();
+  if (lib_dir.empty()) {
+    tried.push_back(::acceptance::hipw::init_result().hip_lib_loaded
+                        ? "libamdhip64.so (lib dir unknown)"
+                        : "libamdhip64.so (not loaded)");
+  }
+  if (resolve_from_rocm_core(env, lib_dir, tried)) return;
+  if (resolve_from_loaded_runtime(env, lib_dir, tried)) return;
 #endif
-  if (resolve_from_rocm_path_env(env)) return;
-#ifdef ACCEPT_HAVE_HIP
-  if (resolve_from_hip_runtime(env)) return;
-#endif
-  if (resolve_from_opt_rocm(env)) return;
+  if (resolve_from_rocm_path_env(env, tried)) return;
+  if (resolve_from_opt_rocm(env, tried)) return;
   env.rocm_version.clear();
   env.rocm_path.clear();
   env.rocm_version_source = "none";
+  for (const std::string& t : tried)
+    env.rocm_version_tried += (env.rocm_version_tried.empty() ? "" : ", ") + t;
 }
 
 // The deterministic fixed descriptor returned when ACCEPT_FAKE_ENV is set.
@@ -733,6 +797,7 @@ EnvironmentInfo fake_env() {
   env.rocm_version = "0.0-fake";
   env.rocm_path = "/fake/rocm";
   env.rocm_version_source = "opt_rocm";
+  env.hip_version = "0.0-fake";
   env.gpu_count = 8;
   env.kernel = "0.0.0-fake";
   env.os = "FakeOS 1.0";
@@ -788,6 +853,19 @@ std::string decode_hip_version(int version) {
   char buf[64];
   std::snprintf(buf, sizeof(buf), "%ld.%ld.%ld", major, minor, patch);
   return buf;
+}
+
+std::string format_rocm_core_version(unsigned int major, unsigned int minor,
+                                     unsigned int patch) {
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%u.%u.%u", major, minor, patch);
+  return buf;
+}
+
+std::string rocm_version_unknown_error(const EnvironmentInfo& env) {
+  if (env.rocm_version_source != "none") return std::string();
+  return "ERROR: ROCm release version unknown (tried: " + env.rocm_version_tried +
+         "); rocm when-terms will not match";
 }
 
 std::optional<std::string> find_info_version(const std::string& start_dir,
@@ -905,6 +983,8 @@ std::string EnvironmentInfo::to_kv() const {
   out << "rocm_version=" << kv_safe(rocm_version) << "\n";
   out << "rocm_path=" << kv_safe(rocm_path) << "\n";
   out << "rocm_version_source=" << kv_safe(rocm_version_source) << "\n";
+  out << "rocm_version_tried=" << kv_safe(rocm_version_tried) << "\n";
+  out << "hip_version=" << kv_safe(hip_version) << "\n";
   out << "gpu_count=" << TestResult::int_to_chars(gpu_count) << "\n";
   out << "kernel=" << kv_safe(kernel) << "\n";
   out << "os=" << kv_safe(os) << "\n";
@@ -987,6 +1067,8 @@ EnvironmentInfo EnvironmentInfo::from_kv(const std::vector<std::string>& lines) 
     else if (key == "rocm_version") env.rocm_version = val;
     else if (key == "rocm_path")    env.rocm_path = val;
     else if (key == "rocm_version_source") env.rocm_version_source = val;
+    else if (key == "rocm_version_tried") env.rocm_version_tried = val;
+    else if (key == "hip_version")  env.hip_version = val;
     else if (key == "gpu_count")    env.gpu_count = to_int(val, 0);
     else if (key == "kernel")       env.kernel = val;
     else if (key == "os")           env.os = val;
