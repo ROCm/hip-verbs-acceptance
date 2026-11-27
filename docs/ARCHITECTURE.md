@@ -646,7 +646,7 @@ selection filter narrowed the run.
 
 ```jsonc
 {
-  "schema_version": "1.3",
+  "schema_version": "1.4",
   "harness": { "version": "0.1.0", "git_sha": "9133e10-dirty" },
                                                 // build-time harness version + git SHA;
                                                 // git_sha is "unknown" for a build with
@@ -661,8 +661,9 @@ selection filter narrowed the run.
     { "host": "node-a", "rank": 0,
       "environment": {                         // detected dimensions, per node
         "vendor": "thor", "rdma_prefix": "bnxt_re",
-        "rocm_version": "7.0.1", "rocm_path": "/opt/rocm-7.0.1",
-        "rocm_version_source": "runtime_info",                  // runtime_info | rocm_path | hip_runtime | opt_rocm | none
+        "rocm_version": "7.0.1", "rocm_path": "/opt/rocm-7.0.1", // ROCm RELEASE version
+        "rocm_version_source": "rocm_core",                     // rocm_core | runtime_info | rocm_path | opt_rocm | none
+        "hip_version": "7.0.51831",                             // hipRuntimeGetVersion(); informational
         "gpu_count": 8,
         "kernel": "5.15.0", "os": "Ubuntu 22.04",
         "gpu_model": "…", "driver_version": "…",
