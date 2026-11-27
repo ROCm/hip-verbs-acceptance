@@ -32,6 +32,8 @@ std::once_flag      g_once;
 void*               g_handle = nullptr;
 pd_set_udma_mask_fn g_set_udma = nullptr;
 qp_set_gda_fn       g_set_gda  = nullptr;
+pd_set_sqcmb_fn     g_set_sqcmb = nullptr;  // optional, see header
+is_ionic_ctx_fn     g_is_ionic_ctx = nullptr;  // optional, see header
 
 void load_once() {
   // Same soname order as the presence probe in common/Capability.cpp.
@@ -46,6 +48,13 @@ void load_once() {
       ::dlvsym(g_handle, "ionic_dv_pd_set_udma_mask", kIonicVersion));
   g_set_gda = reinterpret_cast<qp_set_gda_fn>(
       ::dlvsym(g_handle, "ionic_dv_qp_set_gda", kIonicVersion));
+
+  // Optional and independent of the two required symbols above: a libionic
+  // without it still serves every test that does not touch SQ placement.
+  g_set_sqcmb = reinterpret_cast<pd_set_sqcmb_fn>(
+      ::dlvsym(g_handle, "ionic_dv_pd_set_sqcmb", kIonicVersion));
+  g_is_ionic_ctx = reinterpret_cast<is_ionic_ctx_fn>(
+      ::dlvsym(g_handle, "ionic_dv_is_ionic_ctx", kIonicVersion));
 
   if (g_set_udma == nullptr || g_set_gda == nullptr) {
     g_set_udma = nullptr;  // partial load -> unavailable
@@ -64,6 +73,8 @@ bool available() { return g_set_udma != nullptr && g_set_gda != nullptr; }
 
 pd_set_udma_mask_fn pd_set_udma_mask() { return g_set_udma; }
 qp_set_gda_fn       qp_set_gda()       { return g_set_gda; }
+pd_set_sqcmb_fn     pd_set_sqcmb()     { return g_set_sqcmb; }
+is_ionic_ctx_fn     is_ionic_ctx()     { return g_is_ionic_ctx; }
 
 }  // namespace ionicdv
 }  // namespace acceptance

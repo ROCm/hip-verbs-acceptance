@@ -38,6 +38,9 @@ vat_ionic_inline_capacity,MUST_PASS,,,,
 # hard fail (the test's in-body skip -> MUST_PASS gate fail, which is intended).
 vat_ionic_udma_mask,MUST_PASS,sym:libionic,,,
 vat_ionic_gda_enable,MUST_PASS,sym:libionic,,,
+# ibv_post_send cost (verbs/post_cost.cc): out-of-box median vs the non-default
+# IONIC_SQ_CMB placements when libionic is present, else vs the hardcoded ionic figure.
+vat_post_send_cost,MUST_PASS,,,,
 
 # ===================== HIP =====================
 

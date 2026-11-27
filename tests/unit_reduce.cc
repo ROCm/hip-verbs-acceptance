@@ -200,6 +200,7 @@ int main() {
   accept_test::run_topology_tests();
   accept_test::run_perf_tests();
   accept_test::run_capability_tests();
+  accept_test::run_postcost_tests();
 
   std::printf("unit_tests: %d checks, %d failures\n", accept_test::g_checks,
               accept_test::g_failures);

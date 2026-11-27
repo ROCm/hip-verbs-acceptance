@@ -55,5 +55,6 @@ void run_launch_tests();
 void run_topology_tests();
 void run_perf_tests();
 void run_capability_tests();
+void run_postcost_tests();
 
 }  // namespace accept_test

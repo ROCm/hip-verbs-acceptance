@@ -423,6 +423,22 @@ anything keeps its keys as-is, the other rank's are prefixed `rank<N>.`.
 `category,test,metric,size,size_bytes,median,min,max,avg,unit,iters` for
 tracking over time. A failed CSV write warns; it does not fail the run.
 
+One test is the exception to "perf never gates": the `ibv_post_send` cost test
+(`vat_post_send_cost`, category `verbs/datapath`, `verbs/post_cost.cc`) fails
+functionally when the **out-of-box** `ibv_post_send` is unreasonably slow (e.g. an
+uncached controller-memory-buffer send queue on ionic costs ~3 µs per post against
+~0.15–0.5 µs for host memory or write-combining CMB; Broadcom Thor measures
+~0.16 µs). On ionic with libionic present it measures the default and the
+non-default `IONIC_SQ_CMB` placements and fails when an alternative beats the
+default by more than 30% (95% CI of the median). On any other host (no libionic,
+or a non-ionic NIC) it compares the default with a hardcoded expected median for
+the NIC family (ionic 500 ns, Thor 250 ns) plus the same tolerance. Only a broken
+default fails, and only then does the message recommend a setting. Tune with
+`ACCEPT_POST_SEND_TOLERANCE_PCT` (default 30) and `ACCEPT_POST_SEND_REF_NS`
+(overrides the expected median); both are forwarded to ssh workers with the other
+`ACCEPT_*` variables. A per-shape table is printed to stderr; `--kind perf` adds
+the samples and the post→CQE latency as report-only metrics.
+
 #### Comparing runs
 
 `scripts/perf_report.py` renders a report in full — every metric with its band,

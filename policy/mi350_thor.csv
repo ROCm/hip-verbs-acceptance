@@ -34,6 +34,8 @@ vat_ionic_sq_sig_all,NA,,,,not an ionic NIC
 vat_ionic_inline_capacity,NA,,,,not an ionic NIC
 vat_ionic_udma_mask,NA,,,,not an ionic NIC
 vat_ionic_gda_enable,NA,,,,not an ionic NIC
+# ibv_post_send cost (verbs/post_cost.cc): out-of-box median vs the hardcoded Thor figure.
+vat_post_send_cost,MUST_PASS,,,,
 
 # ===================== HIP =====================
 

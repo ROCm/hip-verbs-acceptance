@@ -111,6 +111,7 @@ if(ACCEPT_WITH_IBVERBS)
     verbs/data_path.cc
     verbs/connection.cc
     verbs/recovery.cc
+    verbs/post_cost.cc
   )
 endif()
 
@@ -190,6 +191,7 @@ add_executable(unit_tests
   tests/unit_topology.cc
   tests/unit_perf.cc
   tests/unit_capability.cc
+  tests/unit_postcost.cc
   common/Reporter.cpp
   common/PerfSummary.cpp
   common/Policy.cpp
